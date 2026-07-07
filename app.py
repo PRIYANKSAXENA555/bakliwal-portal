@@ -32,7 +32,7 @@ DB_PATH = os.path.join(BASE_DIR, 'students.db')
 # Google Sheets Configuration
 # Use environment variable for credentials
 GOOGLE_SHEETS_CREDENTIALS = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-SHEET_NAME = os.environ.get('SHEET_NAME', 'StudentMarks')
+SHEET_NAME = os.environ.get('SHEET_NAME', 'Master Sheet')
 
 # ====================================================================
 # DATABASE SETUP
