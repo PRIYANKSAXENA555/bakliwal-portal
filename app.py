@@ -1,6 +1,6 @@
 # ====================================================================
 # BAKLIWAL TUTORIALS - COMPLETE STUDENT PORTAL
-# WITH STUDENT NAME DROPDOWN + CASE-INSENSITIVE MOTHER'S NAME
+# WITH FULL GOOGLE SHEETS SYNC
 # ====================================================================
 
 import os
@@ -19,15 +19,14 @@ from werkzeug.security import generate_password_hash, check_password_hash
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-this')
 
-# Database path - use temp directory for Render
 DB_PATH = os.path.join(tempfile.gettempdir(), 'students.db')
 
-# Google Sheets Configuration
 SHEET_NAME = os.environ.get('SHEET_NAME', 'Master Sheet')
 GOOGLE_CREDENTIALS_JSON = os.environ.get('GOOGLE_CREDENTIALS_JSON')
 
 print(f"✅ Starting Bakliwal Portal")
 print(f"📊 Database path: {DB_PATH}")
+print(f"📝 Sheet name: {SHEET_NAME}")
 
 # Try to import Google Sheets
 try:
@@ -57,12 +56,11 @@ def init_db():
     try:
         conn = get_db_connection()
         if not conn:
-            print("❌ Failed to connect to database")
             return False
             
         cursor = conn.cursor()
 
-        # Students table
+        # Create all tables
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS students (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,7 +77,6 @@ def init_db():
             )
         ''')
 
-        # Exercises table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS exercises (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,7 +89,6 @@ def init_db():
             )
         ''')
 
-        # Progress table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS progress (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,7 +102,6 @@ def init_db():
             )
         ''')
 
-        # Messages table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,7 +115,6 @@ def init_db():
             )
         ''')
 
-        # Test Results table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS test_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -176,31 +170,6 @@ def init_db():
                     VALUES (?, ?, ?)
                 ''', (subject, chapter, exercise_name))
 
-        # Add sample students
-        cursor.execute('SELECT COUNT(*) as count FROM students WHERE is_teacher = 0')
-        if cursor.fetchone()[0] == 0:
-            print("📝 Adding sample students...")
-            sample_students = [
-                ('KETKI KULKARNI', '23000010', 'Varsha', 'WOW', 'JS'),
-                ('KARTIK KULKARNI', '23000009', 'Smita', 'WOW', 'JS'),
-                ('JAYRAJ HUGAR', '23000008', 'Jayashri', 'WOW', 'JS'),
-                ('OJAS HUMNABADKAR', '25800325', 'Pratibha', 'WOW', 'JS'),
-                ('SATVIKA MORE', '23000017', 'Manisha', 'WOW', 'JS'),
-            ]
-            for name, roll, mother, batch, branch in sample_students:
-                password_hash = generate_password_hash(mother.lower())
-                cursor.execute('''
-                    INSERT INTO students (name, roll_no, mother_name, batch, branch, password_hash, is_teacher)
-                    VALUES (?, ?, ?, ?, ?, ?, 0)
-                ''', (name, roll, mother, batch, branch, password_hash))
-                student_id = cursor.lastrowid
-                exercises = cursor.execute('SELECT id FROM exercises').fetchall()
-                for ex in exercises:
-                    cursor.execute('''
-                        INSERT OR IGNORE INTO progress (student_id, exercise_id, status, discussed)
-                        VALUES (?, ?, 'pending', 'no')
-                    ''', (student_id, ex[0]))
-
         conn.commit()
         conn.close()
         print("✅ Database initialized successfully!")
@@ -212,16 +181,7 @@ def init_db():
         return False
 
 # ====================================================================
-# INITIALIZE DATABASE ON STARTUP
-# ====================================================================
-
-print("=" * 60)
-print("🚀 Initializing application...")
-init_db()
-print("=" * 60)
-
-# ====================================================================
-# GOOGLE SHEETS SYNC
+# GOOGLE SHEETS SYNC - COMPLETE
 # ====================================================================
 
 def get_google_sheets_client():
@@ -236,34 +196,46 @@ def get_google_sheets_client():
         print(f"⚠️ Google Sheets error: {e}")
         return None
 
-def sync_students_from_google_sheets():
-    """Sync students from Google Sheets (Sheet20 + Mother Name)"""
+def sync_all_from_google_sheets():
+    """Complete sync: Students + Mother Names + Test Results"""
+    print("🔄 Starting full Google Sheets sync...")
+    
     client = get_google_sheets_client()
     if not client:
         print("⚠️ Google Sheets client not available")
-        return
+        return False
 
     try:
-        print("🔄 Syncing students from Google Sheets...")
         spreadsheet = client.open(SHEET_NAME)
         
-        # Get mother names from "Mother Name" sheet
+        # ============================================================
+        # 1. SYNC MOTHER NAMES
+        # ============================================================
+        print("📋 Reading Mother Names...")
         mother_sheet = spreadsheet.worksheet('Mother Name')
         mother_data = mother_sheet.get_all_values()
         mother_dict = {}
-        for row in mother_data[1:]:  # Skip header
+        
+        # Skip header row
+        for row in mother_data[1:]:
             if len(row) >= 2:
-                student_name = row[0].strip().upper()  # Store in uppercase for case-insensitive matching
+                student_name = row[0].strip().upper()
                 mother_name = row[1].strip()
-                mother_dict[student_name] = mother_name
-        print(f"📋 Found {len(mother_dict)} mother names")
+                if student_name and mother_name:
+                    mother_dict[student_name] = mother_name
+        
+        print(f"   ✅ Found {len(mother_dict)} mother names")
 
-        # Get student data from Sheet20
+        # ============================================================
+        # 2. SYNC STUDENTS FROM SHEET20
+        # ============================================================
+        print("📋 Reading Sheet20...")
         sheet20 = spreadsheet.worksheet('Sheet20')
         data = sheet20.get_all_values()
+        
         if len(data) < 2:
             print("⚠️ No data in Sheet20")
-            return
+            return False
 
         headers = data[0]
         name_idx = headers.index('NAME') if 'NAME' in headers else -1
@@ -273,17 +245,26 @@ def sync_students_from_google_sheets():
 
         if roll_idx == -1:
             print("⚠️ ROLL NO column not found")
-            return
+            return False
 
         conn = get_db_connection()
         if not conn:
-            return
+            return False
         cursor = conn.cursor()
 
-        # Get existing students
-        existing_rolls = set([row[0] for row in cursor.execute('SELECT roll_no FROM students WHERE is_teacher = 0').fetchall()])
-        new_rolls = set()
+        # Clear existing students (keep teachers)
+        cursor.execute('DELETE FROM students WHERE is_teacher = 0')
+        
+        # Also clear progress for students
+        cursor.execute('DELETE FROM progress')
+        
         student_count = 0
+        exercise_count = 0
+
+        # Get all exercises for assigning to students
+        cursor.execute('SELECT id FROM exercises')
+        exercises = cursor.fetchall()
+        exercise_ids = [ex[0] for ex in exercises]
 
         for row in data[1:]:
             if len(row) <= max(roll_idx, name_idx):
@@ -293,41 +274,183 @@ def sync_students_from_google_sheets():
             if not roll_no:
                 continue
 
-            new_rolls.add(roll_no)
             name = str(row[name_idx]).strip() if name_idx != -1 else 'Student'
             batch = str(row[batch_idx]).strip() if batch_idx != -1 else ''
             branch = str(row[branch_idx]).strip() if branch_idx != -1 else ''
             
             # Get mother name from dictionary (case-insensitive)
             mother_name = mother_dict.get(name.upper(), 'password')
+            
+            # Create password hash (lowercase for case-insensitive login)
             password_hash = generate_password_hash(mother_name.lower())
 
-            if roll_no in existing_rolls:
-                cursor.execute('''
-                    UPDATE students 
-                    SET name=?, mother_name=?, batch=?, branch=?, password_hash=?
-                    WHERE roll_no=?
-                ''', (name, mother_name, batch, branch, password_hash, roll_no))
-            else:
-                cursor.execute('''
-                    INSERT INTO students (name, roll_no, mother_name, batch, branch, password_hash, is_teacher)
-                    VALUES (?, ?, ?, ?, ?, ?, 0)
-                ''', (name, roll_no, mother_name, batch, branch, password_hash))
-                student_id = cursor.lastrowid
-                exercises = cursor.execute('SELECT id FROM exercises').fetchall()
-                for ex in exercises:
-                    cursor.execute('''
-                        INSERT OR IGNORE INTO progress (student_id, exercise_id, status, discussed)
-                        VALUES (?, ?, 'pending', 'no')
-                    ''', (student_id, ex[0]))
+            cursor.execute('''
+                INSERT INTO students (name, roll_no, mother_name, batch, branch, password_hash, is_teacher)
+                VALUES (?, ?, ?, ?, ?, ?, 0)
+            ''', (name, roll_no, mother_name, batch, branch, password_hash))
+            
+            student_id = cursor.lastrowid
             student_count += 1
+            
+            # Assign exercises to this student
+            for ex_id in exercise_ids:
+                cursor.execute('''
+                    INSERT OR IGNORE INTO progress (student_id, exercise_id, status, discussed)
+                    VALUES (?, ?, 'pending', 'no')
+                ''', (student_id, ex_id))
+                exercise_count += 1
 
         conn.commit()
         conn.close()
-        print(f"✅ Synced {student_count} students from Google Sheets")
+        print(f"   ✅ Synced {student_count} students with {exercise_count} exercise assignments")
+
+        # ============================================================
+        # 3. SYNC TEST RESULTS
+        # ============================================================
+        print("📋 Syncing test results...")
+        all_sheets = spreadsheet.worksheets()
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        test_count = 0
+
+        for sheet in all_sheets:
+            sheet_name = sheet.title
+            
+            # Skip non-test sheets
+            if sheet_name in ['Sheet20', 'Mother Name', 'Sheet1'] or sheet_name.startswith('Sheet'):
+                continue
+
+            print(f"   📄 Processing: {sheet_name}")
+            data = sheet.get_all_values()
+            if len(data) < 10:
+                continue
+
+            # Find header row
+            header_row = -1
+            for i in range(min(20, len(data))):
+                if data[i] and data[i][0] == 'TOTAL RANK':
+                    header_row = i
+                    break
+
+            if header_row == -1:
+                continue
+
+            headers = data[header_row]
+            rank_idx = headers.index('TOTAL RANK') if 'TOTAL RANK' in headers else -1
+            roll_idx = headers.index('ROLL NO.') if 'ROLL NO.' in headers else -1
+            phy_idx = headers.index('PHY') if 'PHY' in headers else -1
+            chem_idx = headers.index('CHEM') if 'CHEM' in headers else -1
+            maths_idx = headers.index('MATHS') if 'MATHS' in headers else -1
+            total_idx = headers.index('TOTAL') if 'TOTAL' in headers else -1
+
+            if roll_idx == -1:
+                continue
+
+            # Determine test type
+            is_brtest = sheet_name.upper().startswith('BRTEST')
+            max_phy = 50 if is_brtest else 100
+            max_chem = 50 if is_brtest else 100
+            max_maths = 100
+            max_total = max_phy + max_chem + max_maths
+
+            # Get max marks from sheet
+            if len(data) > header_row + 2 and data[header_row + 2][1] == 'MAX':
+                if len(data[header_row + 2]) > 3:
+                    max_phy = float(data[header_row + 2][3]) if data[header_row + 2][3] else max_phy
+                if len(data[header_row + 2]) > 5:
+                    max_chem = float(data[header_row + 2][5]) if data[header_row + 2][5] else max_chem
+                if len(data[header_row + 2]) > 7:
+                    max_maths = float(data[header_row + 2][7]) if data[header_row + 2][7] else max_maths
+                if len(data[header_row + 2]) > 9:
+                    max_total = float(data[header_row + 2][9]) if data[header_row + 2][9] else max_total
+
+            test_name = sheet_name.replace('BATCH ', '').replace('BTEST', 'Test')
+            test_name = test_name.replace('GRAND TEST', 'Grand Test').replace('BRTEST', 'CET Test')
+
+            for row in data[header_row + 1:]:
+                if len(row) <= roll_idx:
+                    continue
+
+                roll_no = str(row[roll_idx]).strip()
+                if not roll_no:
+                    continue
+
+                cursor.execute('SELECT id FROM students WHERE roll_no = ?', (roll_no,))
+                student = cursor.fetchone()
+                if not student:
+                    continue
+
+                student_id = student[0]
+
+                try:
+                    phy_marks = float(row[phy_idx]) if phy_idx != -1 and row[phy_idx] else 0
+                except:
+                    phy_marks = 0
+                try:
+                    chem_marks = float(row[chem_idx]) if chem_idx != -1 and row[chem_idx] else 0
+                except:
+                    chem_marks = 0
+                try:
+                    maths_marks = float(row[maths_idx]) if maths_idx != -1 and row[maths_idx] else 0
+                except:
+                    maths_marks = 0
+                try:
+                    total_marks = float(row[total_idx]) if total_idx != -1 and row[total_idx] else 0
+                except:
+                    total_marks = phy_marks + chem_marks + maths_marks
+
+                rank = str(row[rank_idx]) if rank_idx != -1 and row[rank_idx] else '-'
+                percentage = (total_marks / max_total * 100) if max_total > 0 else 0
+
+                cursor.execute('''
+                    INSERT OR REPLACE INTO test_results 
+                    (student_id, test_name, test_type, rank, 
+                     physics_marks, physics_max, chemistry_marks, chemistry_max, 
+                     maths_marks, maths_max, total_marks, total_max, percentage, test_date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (student_id, test_name, 'CET' if is_brtest else 'Mains',
+                      rank, phy_marks, max_phy, chem_marks, max_chem,
+                      maths_marks, max_maths, total_marks, max_total, percentage))
+                test_count += 1
+
+        conn.commit()
+        conn.close()
+        print(f"   ✅ Synced {test_count} test results")
+
+        # ============================================================
+        # 4. VERIFY
+        # ============================================================
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) as count FROM students WHERE is_teacher = 0')
+        student_count = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) as count FROM test_results')
+        test_count = cursor.fetchone()[0]
+        conn.close()
+        
+        print(f"✅ Sync complete! {student_count} students, {test_count} test results")
+        return True
 
     except Exception as e:
-        print(f"⚠️ Sync error: {e}")
+        print(f"❌ Sync error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+# ====================================================================
+# INITIALIZE DATABASE AND SYNC ON STARTUP
+# ====================================================================
+
+print("=" * 60)
+print("🚀 Initializing application...")
+init_db()
+print("=" * 60)
+
+# Try to sync from Google Sheets on startup
+print("🔄 Attempting Google Sheets sync...")
+sync_all_from_google_sheets()
+print("=" * 60)
 
 # ====================================================================
 # HELPER FUNCTIONS
@@ -359,8 +482,10 @@ def get_all_student_names():
             return []
         students = conn.execute('SELECT id, name, roll_no FROM students WHERE is_teacher = 0 ORDER BY name').fetchall()
         conn.close()
+        print(f"📋 Loaded {len(students)} students for dropdown")
         return [dict(s) for s in students]
-    except:
+    except Exception as e:
+        print(f"❌ Error loading students: {e}")
         return []
 
 def get_unread_count(user_id):
@@ -491,6 +616,7 @@ def index():
 def login():
     # Get all student names for dropdown
     student_list = get_all_student_names()
+    print(f"📋 Login page loaded with {len(student_list)} students")
     
     if request.method == 'POST':
         # Get student name from dropdown
@@ -560,7 +686,7 @@ LOGIN_TEMPLATE = '''
         .logo p{color:#666;font-size:14px;}
         .form-group{margin-bottom:20px;}
         label{display:block;margin-bottom:8px;font-weight:500;color:#333;font-size:14px;}
-        select{width:100%;padding:12px 15px;border:2px solid #e0e0e0;border-radius:10px;font-size:16px;background:white;appearance:none;}
+        select{width:100%;padding:12px 15px;border:2px solid #e0e0e0;border-radius:10px;font-size:16px;background:white;}
         select:focus{outline:none;border-color:#667eea;}
         input{width:100%;padding:12px 15px;border:2px solid #e0e0e0;border-radius:10px;font-size:16px;}
         input:focus{outline:none;border-color:#667eea;}
@@ -577,6 +703,7 @@ LOGIN_TEMPLATE = '''
         .divider{text-align:center;padding:15px 0;color:#999;font-size:13px;}
         .divider span{background:white;padding:0 15px;}
         .teacher-section{border-top:2px solid #e0e0e0;padding-top:20px;margin-top:10px;}
+        .student-count{font-size:12px;color:#999;margin-left:10px;}
     </style>
 </head>
 <body>
@@ -592,7 +719,7 @@ LOGIN_TEMPLATE = '''
     
     <form method="POST">
         <div class="form-group">
-            <label>👨‍🎓 Select Your Name</label>
+            <label>👨‍🎓 Select Your Name <span class="student-count">({{ student_list|length }} students)</span></label>
             <select name="student_id" required>
                 <option value="">-- Select Student --</option>
                 {% for student in student_list %}
@@ -602,7 +729,7 @@ LOGIN_TEMPLATE = '''
         </div>
         <div class="form-group">
             <label>🔑 Password (Mother's Name)</label>
-            <input type="password" name="password" placeholder="Enter your mother's name" required>
+            <input type="password" name="password" placeholder="Enter your mother's name (any case)" required>
         </div>
         <button type="submit">🔓 Login</button>
     </form>
@@ -973,14 +1100,14 @@ def teacher_update_status():
 @teacher_required
 def sync_data():
     try:
-        sync_students_from_google_sheets()
+        sync_all_from_google_sheets()
         flash('✅ Data synced from Google Sheets!', 'success')
     except Exception as e:
         flash(f'⚠️ Error syncing: {str(e)}', 'error')
     return redirect(url_for('teacher_dashboard'))
 
 # ====================================================================
-# MESSAGING (Simplified - Same as before)
+# MESSAGING ROUTES (Same as before)
 # ====================================================================
 
 @app.route('/teacher/messages')
