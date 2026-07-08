@@ -1,6 +1,6 @@
 # ====================================================================
 # BAKLIWAL TUTORIALS - COMPLETE STUDENT PORTAL
-# WITH DEBUG LOGGING FOR SYNC
+# FIXED: Login error + Google Sheets sync
 # ====================================================================
 
 import os
@@ -27,7 +27,6 @@ print(f"📝 Sheet Name: {SHEET_NAME}")
 print(f"🔑 Credentials: {'✅ Set' if GOOGLE_CREDENTIALS_JSON else '❌ NOT SET'}")
 print("=" * 70)
 
-# Try Google Sheets
 try:
     import gspread
     from oauth2client.service_account import ServiceAccountCredentials
@@ -175,40 +174,22 @@ def init_db():
         return False
 
 # ====================================================================
-# GOOGLE SHEETS SYNC WITH DEBUGGING
+# GOOGLE SHEETS SYNC
 # ====================================================================
 
 def get_gs_client():
-    """Get Google Sheets client with debugging"""
-    print("🔑 Getting Google Sheets client...")
-    
-    if not HAS_GSHEETS:
-        print("❌ gspread not installed")
+    if not HAS_GSHEETS or not GOOGLE_CREDENTIALS_JSON:
         return None
-    
-    if not GOOGLE_CREDENTIALS_JSON:
-        print("❌ GOOGLE_CREDENTIALS_JSON not set")
-        return None
-    
     try:
-        print("📋 Parsing credentials...")
         creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
-        print(f"   ✅ Credentials parsed. Project: {creds_dict.get('project_id', 'unknown')}")
-        
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        client = gspread.authorize(creds)
-        print("✅ Google Sheets client created")
-        return client
-    except json.JSONDecodeError as e:
-        print(f"❌ Invalid JSON in GOOGLE_CREDENTIALS_JSON: {e}")
-        return None
+        return gspread.authorize(creds)
     except Exception as e:
-        print(f"❌ Google Sheets auth error: {e}")
+        print(f"⚠️ GS error: {e}")
         return None
 
 def sync_all():
-    """Full sync with detailed logging"""
     print("=" * 70)
     print("🔄 STARTING FULL SYNC...")
     print("=" * 70)
@@ -223,72 +204,44 @@ def sync_all():
         spreadsheet = client.open(SHEET_NAME)
         print(f"✅ Spreadsheet opened: {spreadsheet.title}")
         
-        # Get all sheet names
         all_sheets = spreadsheet.worksheets()
         sheet_names = [s.title for s in all_sheets]
         print(f"📋 Available sheets: {', '.join(sheet_names)}")
         
-        # Check for required sheets
         if 'Sheet20' not in sheet_names:
-            print("❌ Sheet20 not found!")
             return 0, "Sheet20 not found in spreadsheet"
         
-        if 'Mother Name' not in sheet_names:
-            print("⚠️ Mother Name sheet not found - will use default passwords")
-        
-        # ============================================================
-        # 1. GET MOTHER NAMES
-        # ============================================================
+        # Get mother names
         print("\n📋 Reading Mother Name sheet...")
         mother_dict = {}
         try:
             mother_sheet = spreadsheet.worksheet('Mother Name')
             mother_data = mother_sheet.get_all_values()
-            print(f"   Found {len(mother_data)} rows in Mother Name sheet")
-            
-            for i, row in enumerate(mother_data[1:], 2):
+            for row in mother_data[1:]:
                 if len(row) >= 2 and row[0].strip():
-                    student_name = row[0].strip().upper()
-                    mother_name = row[1].strip()
-                    mother_dict[student_name] = mother_name
-                    if i <= 5:  # Print first 5 for debugging
-                        print(f"   {i}: {student_name} → {mother_name}")
-            
+                    mother_dict[row[0].strip().upper()] = row[1].strip()
             print(f"   ✅ Loaded {len(mother_dict)} mother names")
         except Exception as e:
             print(f"   ⚠️ Error reading Mother Name: {e}")
-            mother_dict = {}
 
-        # ============================================================
-        # 2. GET STUDENTS FROM SHEET20
-        # ============================================================
+        # Get students from Sheet20
         print("\n📋 Reading Sheet20...")
         sheet20 = spreadsheet.worksheet('Sheet20')
         data = sheet20.get_all_values()
         print(f"   Found {len(data)} rows in Sheet20")
         
         if len(data) < 2:
-            print("❌ Sheet20 has no data rows")
             return 0, "Sheet20 is empty"
         
         headers = data[0]
-        print(f"   Headers: {headers}")
-        
         name_idx = headers.index('NAME') if 'NAME' in headers else -1
         roll_idx = headers.index('ROLL NO') if 'ROLL NO' in headers else -1
         batch_idx = headers.index('BATCH') if 'BATCH' in headers else -1
         branch_idx = headers.index('BRANCH') if 'BRANCH' in headers else -1
         
-        print(f"   NAME column: {name_idx}, ROLL NO column: {roll_idx}")
-        
         if roll_idx == -1 or name_idx == -1:
-            print("❌ Required columns not found")
-            return 0, "NAME or ROLL NO column not found in Sheet20"
+            return 0, "NAME or ROLL NO column not found"
         
-        # ============================================================
-        # 3. CLEAR AND RE-POPULATE STUDENTS
-        # ============================================================
-        print("\n📝 Updating database...")
         conn = get_db_connection()
         if not conn:
             return 0, "Database connection failed"
@@ -297,18 +250,14 @@ def sync_all():
         # Clear non-teacher students
         cursor.execute('DELETE FROM students WHERE is_teacher = 0')
         cursor.execute('DELETE FROM progress')
-        print("   Cleared existing students")
         
-        # Get exercises
         cursor.execute('SELECT id FROM exercises')
         exercise_ids = [row[0] for row in cursor.fetchall()]
-        print(f"   Found {len(exercise_ids)} exercises")
         
         student_count = 0
         for row in data[1:]:
             if len(row) <= max(roll_idx, name_idx):
                 continue
-            
             roll_no = str(row[roll_idx]).strip()
             if not roll_no:
                 continue
@@ -316,8 +265,6 @@ def sync_all():
             name = str(row[name_idx]).strip() if name_idx != -1 else 'Student'
             batch = str(row[batch_idx]).strip() if batch_idx != -1 else ''
             branch = str(row[branch_idx]).strip() if branch_idx != -1 else ''
-            
-            # Get mother name (case-insensitive)
             mother_name = mother_dict.get(name.upper(), 'password')
             password_hash = generate_password_hash(mother_name.lower())
             
@@ -329,33 +276,17 @@ def sync_all():
             student_id = cursor.lastrowid
             student_count += 1
             
-            # Assign exercises
             for ex_id in exercise_ids:
                 cursor.execute('''
                     INSERT OR IGNORE INTO progress (student_id, exercise_id, status, discussed)
                     VALUES (?, ?, 'pending', 'no')
                 ''', (student_id, ex_id))
-            
-            if student_count <= 5:
-                print(f"   Added: {name} ({roll_no}) - Mother: {mother_name}")
         
         print(f"   ✅ Added {student_count} students")
 
-        # ============================================================
-        # 4. SYNC TEST RESULTS
-        # ============================================================
+        # Sync test results
         print("\n📋 Syncing test results...")
         test_count = 0
-        test_sheets = []
-        
-        for sheet in all_sheets:
-            sheet_name = sheet.title
-            if sheet_name in ['Sheet20', 'Mother Name', 'Sheet1'] or sheet_name.startswith('Sheet'):
-                continue
-            test_sheets.append(sheet_name)
-        
-        print(f"   Found {len(test_sheets)} test sheets: {', '.join(test_sheets[:5])}...")
-        
         for sheet in all_sheets:
             sheet_name = sheet.title
             if sheet_name in ['Sheet20', 'Mother Name', 'Sheet1'] or sheet_name.startswith('Sheet'):
@@ -364,18 +295,14 @@ def sync_all():
             print(f"   📄 Processing: {sheet_name}")
             data = sheet.get_all_values()
             if len(data) < 10:
-                print(f"      ⚠️ Too few rows ({len(data)}), skipping")
                 continue
             
-            # Find header
             header_row = -1
             for i in range(min(20, len(data))):
                 if data[i] and data[i][0] == 'TOTAL RANK':
                     header_row = i
                     break
-            
             if header_row == -1:
-                print(f"      ⚠️ No 'TOTAL RANK' header found, skipping")
                 continue
             
             headers = data[header_row]
@@ -387,7 +314,6 @@ def sync_all():
             total_idx = headers.index('TOTAL') if 'TOTAL' in headers else -1
             
             if roll_idx == -1:
-                print(f"      ⚠️ No 'ROLL NO.' column, skipping")
                 continue
             
             is_brtest = sheet_name.upper().startswith('BRTEST')
@@ -398,9 +324,7 @@ def sync_all():
             
             test_name = sheet_name.replace('BATCH ', '').replace('BTEST', 'Test')
             test_name = test_name.replace('GRAND TEST', 'Grand Test').replace('BRTEST', 'CET Test')
-            print(f"      Test: {test_name}, Type: {'CET' if is_brtest else 'Mains'}")
             
-            row_count = 0
             for row in data[header_row + 1:]:
                 if len(row) <= roll_idx:
                     continue
@@ -443,9 +367,6 @@ def sync_all():
                       rank, phy, max_phy, chem, max_chem, maths, max_maths,
                       total, max_total, percentage))
                 test_count += 1
-                row_count += 1
-            
-            print(f"      Added {row_count} test results")
         
         conn.commit()
         conn.close()
@@ -471,7 +392,6 @@ def sync_all():
 # ====================================================================
 
 def seed_demo_data():
-    """Add demo students if no students exist"""
     conn = get_db_connection()
     if not conn:
         return
@@ -524,7 +444,6 @@ print("\n" + "=" * 70)
 init_db()
 print("=" * 70)
 
-# Try sync
 print("\n📡 ATTEMPTING GOOGLE SHEETS SYNC...")
 count, error = sync_all()
 
@@ -535,7 +454,6 @@ else:
     print("📝 Seeding demo data instead...")
     seed_demo_data()
 
-# Verify
 conn = get_db_connection()
 if conn:
     cursor = conn.cursor()
@@ -670,10 +588,10 @@ def get_test_results(student_id):
         if not conn:
             return []
         results = conn.execute('''
-            SELECT * FROM test_results
-            WHERE student_id = ?
-            ORDER BY test_date DESC
-        ''', (student_id,)).fetchall()
+                SELECT * FROM test_results
+                WHERE student_id = ?
+                ORDER BY test_date DESC
+            ''', (student_id,)).fetchall()
         conn.close()
         return [dict(r) for r in results]
     except:
@@ -691,12 +609,19 @@ def get_student_stats(student_id):
             WHERE student_id = ? AND rank != '-'
         ''', (student_id,)).fetchone()
         conn.close()
-        return dict(results) if results else {'total_tests': 0, 'avg_percentage': 0, 'best_rank': None, 'highest_score': 0}
+        if results:
+            return {
+                'total_tests': results[0] or 0,
+                'avg_percentage': results[1] or 0,
+                'best_rank': results[2],
+                'highest_score': results[3] or 0
+            }
+        return {'total_tests': 0, 'avg_percentage': 0, 'best_rank': None, 'highest_score': 0}
     except:
         return {'total_tests': 0, 'avg_percentage': 0, 'best_rank': None, 'highest_score': 0}
 
 # ====================================================================
-# ROUTES - AUTHENTICATION
+# ROUTES
 # ====================================================================
 
 @app.route('/')
@@ -729,23 +654,30 @@ def login():
             
             conn.close()
             
-            if user and check_password_hash(user['password_hash'], password.lower()):
-                session['user_id'] = user['id']
-                session['user_name'] = user['name']
-                session['roll_no'] = user['roll_no']
-                session['is_teacher'] = user.get('is_teacher', 0)
-                session['subject'] = user.get('subject') if user.get('is_teacher') else None
-                flash(f'Welcome {user["name"]}!', 'success')
-                
-                if user.get('is_teacher'):
-                    return redirect(url_for('teacher_dashboard'))
+            if user:
+                # Convert Row to dict for easier access
+                user_dict = dict(user)
+                if check_password_hash(user_dict['password_hash'], password.lower()):
+                    session['user_id'] = user_dict['id']
+                    session['user_name'] = user_dict['name']
+                    session['roll_no'] = user_dict['roll_no']
+                    session['is_teacher'] = user_dict.get('is_teacher', 0)
+                    session['subject'] = user_dict.get('subject') if user_dict.get('is_teacher') else None
+                    flash(f'Welcome {user_dict["name"]}!', 'success')
+                    
+                    if user_dict.get('is_teacher'):
+                        return redirect(url_for('teacher_dashboard'))
+                    else:
+                        return redirect(url_for('student_dashboard'))
                 else:
-                    return redirect(url_for('student_dashboard'))
+                    flash('Invalid password. Use your Mother\'s Name.', 'error')
             else:
-                flash('Invalid password. Use your Mother\'s Name.', 'error')
+                flash('User not found.', 'error')
         except Exception as e:
             print(f"❌ Login error: {e}")
-            flash('Login error', 'error')
+            import traceback
+            traceback.print_exc()
+            flash('Login error. Please try again.', 'error')
     
     return render_template_string(LOGIN_TEMPLATE, students=students)
 
@@ -1113,98 +1045,101 @@ def teacher_dashboard():
         exercises = []
         students = []
     
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html>
-    <head><title>{{ subject }} - Teacher</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        *{margin:0;padding:0;box-sizing:border-box;}
-        body{font-family:Segoe UI,sans-serif;background:#f5f5f5;padding:20px;}
-        .container{max-width:1400px;margin:0 auto;}
-        .header{background:white;border-radius:15px;padding:20px 25px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,0.08);}
-        .header h1{font-size:22px;color:#333;}
-        .btn-group{display:flex;gap:10px;flex-wrap:wrap;}
-        .btn-message{background:#667eea;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;text-decoration:none;display:inline-block;}
-        .btn-sync{background:#48bb78;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;text-decoration:none;display:inline-block;}
-        .btn-logout{background:#dc3545;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;}
-        .badge{background:#e53e3e;color:white;padding:2px 8px;border-radius:10px;font-size:12px;margin-left:5px;}
-        .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:20px;margin-bottom:25px;}
-        .stat-card{background:white;border-radius:15px;padding:20px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,0.08);}
-        .stat-card .value{font-size:28px;font-weight:bold;color:#667eea;}
-        .stat-card .label{color:#666;font-size:13px;margin-top:5px;}
-        .section{background:white;border-radius:15px;padding:25px;margin-bottom:25px;box-shadow:0 2px 10px rgba(0,0,0,0.08);overflow-x:auto;}
-        .section-title{font-size:18px;color:#333;margin-bottom:20px;}
-        .add-form{background:#f8f9fa;padding:20px;border-radius:10px;margin-bottom:20px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;}
-        .add-form input{padding:10px 15px;border:2px solid #e0e0e0;border-radius:8px;flex:1;min-width:200px;}
-        .btn-add{background:#48bb78;color:white;padding:10px 25px;border:none;border-radius:8px;cursor:pointer;font-weight:600;}
-        table{width:100%;border-collapse:collapse;font-size:13px;}
-        th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #e0e0e0;}
-        th{background:#f8f9fa;font-weight:600;}
-        .btn-sm{padding:3px 6px;border:none;border-radius:4px;cursor:pointer;font-size:10px;}
-        .btn-done{background:#48bb78;color:white;}
-        .btn-pending{background:#f56565;color:white;}
-        .alert{padding:12px 15px;border-radius:10px;margin-bottom:20px;}
-        .alert-success{background:#d4edda;color:#155724;}
-        @media (max-width:768px){.header{flex-direction:column;align-items:flex-start;gap:15px;}}
-    </style>
-    </head>
-    <body>
-    <div class="container">
-        <div class="header">
-            <div><h1>📖 {{ subject }}</h1><p>Welcome, {{ session.user_name }}!</p></div>
-            <div class="btn-group">
-                <a href="/teacher/sync" class="btn-sync">🔄 Sync Data</a>
-                <a href="/teacher/messages" class="btn-message">💬 Messages <span class="badge">{{ unread_count }}</span></a>
-                <button class="btn-logout" onclick="location.href='/logout'">🚪 Logout</button>
-            </div>
-        </div>
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}<div class="alert alert-success">{{ messages[0][1] }}</div>{% endif %}
-        {% endwith %}
-        <div class="stats-grid">
-            <div class="stat-card"><div class="value">{{ students|length }}</div><div class="label">Students</div></div>
-            <div class="stat-card"><div class="value">{{ exercises|length }}</div><div class="label">Exercises</div></div>
-        </div>
-        <div class="section">
-            <div class="section-title">➕ Add Exercise</div>
-            <div class="add-form">
-                <form method="POST" action="/teacher/add_exercise" style="display:flex;flex-wrap:wrap;gap:10px;width:100%;">
-                    <input type="text" name="chapter" placeholder="Chapter Name" required>
-                    <input type="text" name="exercise_name" placeholder="Exercise Name" required>
-                    <button type="submit" class="btn-add">➕ Add</button>
-                </form>
-            </div>
-        </div>
-        <div class="section">
-            <div class="section-title">👨‍🎓 Student Progress</div>
-            <table>
-                <thead><tr><th>Student</th><th>Roll No</th><th>Exercise</th><th>Status</th></tr></thead>
-                <tbody>
-                    {% for s in students %}
-                        {% for ex in exercises %}
-                        <tr>
-                            <td>{{ s.name }}</td>
-                            <td>{{ s.roll_no or '-' }}</td>
-                            <td>{{ ex.exercise_name }}</td>
-                            <td>
-                                <form method="POST" action="/teacher/update_status" style="display:inline;">
-                                    <input type="hidden" name="student_id" value="{{ s.id }}">
-                                    <input type="hidden" name="exercise_id" value="{{ ex.id }}">
-                                    <button type="submit" name="status" value="done" class="btn-sm btn-done">✓ Done</button>
-                                    <button type="submit" name="status" value="pending" class="btn-sm btn-pending">○ Pending</button>
-                                </form>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    {% endfor %}
-                </tbody>
-            </table>
+    return render_template_string(TEACHER_DASHBOARD_TEMPLATE, 
+        subject=subject, students=students, exercises=exercises, unread_count=unread_count)
+
+TEACHER_DASHBOARD_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head><title>{{ subject }} - Teacher</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+    *{margin:0;padding:0;box-sizing:border-box;}
+    body{font-family:Segoe UI,sans-serif;background:#f5f5f5;padding:20px;}
+    .container{max-width:1400px;margin:0 auto;}
+    .header{background:white;border-radius:15px;padding:20px 25px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,0.08);}
+    .header h1{font-size:22px;color:#333;}
+    .btn-group{display:flex;gap:10px;flex-wrap:wrap;}
+    .btn-message{background:#667eea;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;text-decoration:none;display:inline-block;}
+    .btn-sync{background:#48bb78;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;text-decoration:none;display:inline-block;}
+    .btn-logout{background:#dc3545;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;}
+    .badge{background:#e53e3e;color:white;padding:2px 8px;border-radius:10px;font-size:12px;margin-left:5px;}
+    .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:20px;margin-bottom:25px;}
+    .stat-card{background:white;border-radius:15px;padding:20px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,0.08);}
+    .stat-card .value{font-size:28px;font-weight:bold;color:#667eea;}
+    .stat-card .label{color:#666;font-size:13px;margin-top:5px;}
+    .section{background:white;border-radius:15px;padding:25px;margin-bottom:25px;box-shadow:0 2px 10px rgba(0,0,0,0.08);overflow-x:auto;}
+    .section-title{font-size:18px;color:#333;margin-bottom:20px;}
+    .add-form{background:#f8f9fa;padding:20px;border-radius:10px;margin-bottom:20px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;}
+    .add-form input{padding:10px 15px;border:2px solid #e0e0e0;border-radius:8px;flex:1;min-width:200px;}
+    .btn-add{background:#48bb78;color:white;padding:10px 25px;border:none;border-radius:8px;cursor:pointer;font-weight:600;}
+    table{width:100%;border-collapse:collapse;font-size:13px;}
+    th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #e0e0e0;}
+    th{background:#f8f9fa;font-weight:600;}
+    .btn-sm{padding:3px 6px;border:none;border-radius:4px;cursor:pointer;font-size:10px;}
+    .btn-done{background:#48bb78;color:white;}
+    .btn-pending{background:#f56565;color:white;}
+    .alert{padding:12px 15px;border-radius:10px;margin-bottom:20px;}
+    .alert-success{background:#d4edda;color:#155724;}
+    @media (max-width:768px){.header{flex-direction:column;align-items:flex-start;gap:15px;}}
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <div><h1>📖 {{ subject }}</h1><p>Welcome, {{ session.user_name }}!</p></div>
+        <div class="btn-group">
+            <a href="/teacher/sync" class="btn-sync">🔄 Sync Data</a>
+            <a href="/teacher/messages" class="btn-message">💬 Messages <span class="badge">{{ unread_count }}</span></a>
+            <button class="btn-logout" onclick="location.href='/logout'">🚪 Logout</button>
         </div>
     </div>
-    </body>
-    </html>
-    ''', subject=subject, students=students, exercises=exercises, unread_count=unread_count)
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}<div class="alert alert-success">{{ messages[0][1] }}</div>{% endif %}
+    {% endwith %}
+    <div class="stats-grid">
+        <div class="stat-card"><div class="value">{{ students|length }}</div><div class="label">Students</div></div>
+        <div class="stat-card"><div class="value">{{ exercises|length }}</div><div class="label">Exercises</div></div>
+    </div>
+    <div class="section">
+        <div class="section-title">➕ Add Exercise</div>
+        <div class="add-form">
+            <form method="POST" action="/teacher/add_exercise" style="display:flex;flex-wrap:wrap;gap:10px;width:100%;">
+                <input type="text" name="chapter" placeholder="Chapter Name" required>
+                <input type="text" name="exercise_name" placeholder="Exercise Name" required>
+                <button type="submit" class="btn-add">➕ Add</button>
+            </form>
+        </div>
+    </div>
+    <div class="section">
+        <div class="section-title">👨‍🎓 Student Progress</div>
+        <table>
+            <thead><tr><th>Student</th><th>Roll No</th><th>Exercise</th><th>Status</th></tr></thead>
+            <tbody>
+                {% for s in students %}
+                    {% for ex in exercises %}
+                    <tr>
+                        <td>{{ s.name }}</td>
+                        <td>{{ s.roll_no or '-' }}</td>
+                        <td>{{ ex.exercise_name }}</td>
+                        <td>
+                            <form method="POST" action="/teacher/update_status" style="display:inline;">
+                                <input type="hidden" name="student_id" value="{{ s.id }}">
+                                <input type="hidden" name="exercise_id" value="{{ ex.id }}">
+                                <button type="submit" name="status" value="done" class="btn-sm btn-done">✓ Done</button>
+                                <button type="submit" name="status" value="pending" class="btn-sm btn-pending">○ Pending</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+</body>
+</html>
+'''
 
 @app.route('/teacher/add_exercise', methods=['POST'])
 @teacher_required
@@ -1266,7 +1201,7 @@ def sync_data():
     return redirect(url_for('teacher_dashboard'))
 
 # ====================================================================
-# MESSAGING ROUTES (Simplified)
+# MESSAGING ROUTES
 # ====================================================================
 
 @app.route('/teacher/messages')
