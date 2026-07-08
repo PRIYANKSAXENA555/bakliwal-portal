@@ -1,6 +1,6 @@
 # ====================================================================
 # BAKLIWAL TUTORIALS - COMPLETE STUDENT PORTAL
-# FIXED: Database initialization on Render
+# WITH STUDENT NAME DROPDOWN + CASE-INSENSITIVE MOTHER'S NAME
 # ====================================================================
 
 import os
@@ -22,7 +22,7 @@ app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-this')
 # Database path - use temp directory for Render
 DB_PATH = os.path.join(tempfile.gettempdir(), 'students.db')
 
-# Google Sheets Configuration (optional)
+# Google Sheets Configuration
 SHEET_NAME = os.environ.get('SHEET_NAME', 'Master Sheet')
 GOOGLE_CREDENTIALS_JSON = os.environ.get('GOOGLE_CREDENTIALS_JSON')
 
@@ -34,16 +34,16 @@ try:
     import gspread
     from oauth2client.service_account import ServiceAccountCredentials
     HAS_GSHEETS = True
+    print("✅ Google Sheets loaded")
 except ImportError:
     HAS_GSHEETS = False
     print("⚠️ Google Sheets not available")
 
 # ====================================================================
-# DATABASE SETUP - CALLED AT STARTUP
+# DATABASE SETUP
 # ====================================================================
 
 def get_db_connection():
-    """Get database connection"""
     try:
         conn = sqlite3.connect(DB_PATH, timeout=10)
         conn.row_factory = sqlite3.Row
@@ -53,7 +53,6 @@ def get_db_connection():
         return None
 
 def init_db():
-    """Initialize database with all tables"""
     print("🔧 Initializing database...")
     try:
         conn = get_db_connection()
@@ -143,19 +142,15 @@ def init_db():
             )
         ''')
 
-        # Check if students table is empty
-        cursor.execute('SELECT COUNT(*) as count FROM students')
-        student_count = cursor.fetchone()[0]
-
-        # Add default teachers if no students exist
-        if student_count == 0:
+        # Add default teachers
+        cursor.execute('SELECT COUNT(*) as count FROM students WHERE is_teacher = 1')
+        if cursor.fetchone()[0] == 0:
             print("📝 Adding default teachers...")
             teachers = [
                 ('Physics Teacher', 'physics_teacher', 'physics@school.com', 'Physics'),
                 ('Chemistry Teacher', 'chemistry_teacher', 'chemistry@school.com', 'Chemistry'),
                 ('Mathematics Teacher', 'maths_teacher', 'maths@school.com', 'Mathematics')
             ]
-
             for name, username, email, subject in teachers:
                 password_hash = generate_password_hash(username)
                 cursor.execute('''
@@ -209,15 +204,6 @@ def init_db():
         conn.commit()
         conn.close()
         print("✅ Database initialized successfully!")
-        
-        # Verify database
-        conn = get_db_connection()
-        if conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT COUNT(*) as count FROM students')
-            count = cursor.fetchone()[0]
-            conn.close()
-            print(f"✅ Database has {count} students")
         return True
     except Exception as e:
         print(f"❌ Database init error: {e}")
@@ -229,11 +215,119 @@ def init_db():
 # INITIALIZE DATABASE ON STARTUP
 # ====================================================================
 
-# This runs when the app starts (on Render with gunicorn)
 print("=" * 60)
 print("🚀 Initializing application...")
 init_db()
 print("=" * 60)
+
+# ====================================================================
+# GOOGLE SHEETS SYNC
+# ====================================================================
+
+def get_google_sheets_client():
+    if not HAS_GSHEETS or not GOOGLE_CREDENTIALS_JSON:
+        return None
+    try:
+        creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
+        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        return gspread.authorize(creds)
+    except Exception as e:
+        print(f"⚠️ Google Sheets error: {e}")
+        return None
+
+def sync_students_from_google_sheets():
+    """Sync students from Google Sheets (Sheet20 + Mother Name)"""
+    client = get_google_sheets_client()
+    if not client:
+        print("⚠️ Google Sheets client not available")
+        return
+
+    try:
+        print("🔄 Syncing students from Google Sheets...")
+        spreadsheet = client.open(SHEET_NAME)
+        
+        # Get mother names from "Mother Name" sheet
+        mother_sheet = spreadsheet.worksheet('Mother Name')
+        mother_data = mother_sheet.get_all_values()
+        mother_dict = {}
+        for row in mother_data[1:]:  # Skip header
+            if len(row) >= 2:
+                student_name = row[0].strip().upper()  # Store in uppercase for case-insensitive matching
+                mother_name = row[1].strip()
+                mother_dict[student_name] = mother_name
+        print(f"📋 Found {len(mother_dict)} mother names")
+
+        # Get student data from Sheet20
+        sheet20 = spreadsheet.worksheet('Sheet20')
+        data = sheet20.get_all_values()
+        if len(data) < 2:
+            print("⚠️ No data in Sheet20")
+            return
+
+        headers = data[0]
+        name_idx = headers.index('NAME') if 'NAME' in headers else -1
+        roll_idx = headers.index('ROLL NO') if 'ROLL NO' in headers else -1
+        batch_idx = headers.index('BATCH') if 'BATCH' in headers else -1
+        branch_idx = headers.index('BRANCH') if 'BRANCH' in headers else -1
+
+        if roll_idx == -1:
+            print("⚠️ ROLL NO column not found")
+            return
+
+        conn = get_db_connection()
+        if not conn:
+            return
+        cursor = conn.cursor()
+
+        # Get existing students
+        existing_rolls = set([row[0] for row in cursor.execute('SELECT roll_no FROM students WHERE is_teacher = 0').fetchall()])
+        new_rolls = set()
+        student_count = 0
+
+        for row in data[1:]:
+            if len(row) <= max(roll_idx, name_idx):
+                continue
+
+            roll_no = str(row[roll_idx]).strip()
+            if not roll_no:
+                continue
+
+            new_rolls.add(roll_no)
+            name = str(row[name_idx]).strip() if name_idx != -1 else 'Student'
+            batch = str(row[batch_idx]).strip() if batch_idx != -1 else ''
+            branch = str(row[branch_idx]).strip() if branch_idx != -1 else ''
+            
+            # Get mother name from dictionary (case-insensitive)
+            mother_name = mother_dict.get(name.upper(), 'password')
+            password_hash = generate_password_hash(mother_name.lower())
+
+            if roll_no in existing_rolls:
+                cursor.execute('''
+                    UPDATE students 
+                    SET name=?, mother_name=?, batch=?, branch=?, password_hash=?
+                    WHERE roll_no=?
+                ''', (name, mother_name, batch, branch, password_hash, roll_no))
+            else:
+                cursor.execute('''
+                    INSERT INTO students (name, roll_no, mother_name, batch, branch, password_hash, is_teacher)
+                    VALUES (?, ?, ?, ?, ?, ?, 0)
+                ''', (name, roll_no, mother_name, batch, branch, password_hash))
+                student_id = cursor.lastrowid
+                exercises = cursor.execute('SELECT id FROM exercises').fetchall()
+                for ex in exercises:
+                    cursor.execute('''
+                        INSERT OR IGNORE INTO progress (student_id, exercise_id, status, discussed)
+                        VALUES (?, ?, 'pending', 'no')
+                    ''', (student_id, ex[0]))
+            student_count += 1
+
+        conn.commit()
+        conn.close()
+        print(f"✅ Synced {student_count} students from Google Sheets")
+
+    except Exception as e:
+        print(f"⚠️ Sync error: {e}")
 
 # ====================================================================
 # HELPER FUNCTIONS
@@ -256,6 +350,18 @@ def teacher_required(f):
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated
+
+def get_all_student_names():
+    """Get all student names for dropdown"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return []
+        students = conn.execute('SELECT id, name, roll_no FROM students WHERE is_teacher = 0 ORDER BY name').fetchall()
+        conn.close()
+        return [dict(s) for s in students]
+    except:
+        return []
 
 def get_unread_count(user_id):
     try:
@@ -374,34 +480,7 @@ def get_student_stats(student_id):
         return {'total_tests': 0, 'avg_percentage': 0, 'best_rank': None, 'highest_score': 0}
 
 # ====================================================================
-# GOOGLE SHEETS SYNC
-# ====================================================================
-
-def get_google_sheets_client():
-    if not HAS_GSHEETS or not GOOGLE_CREDENTIALS_JSON:
-        return None
-    try:
-        creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        return gspread.authorize(creds)
-    except Exception as e:
-        print(f"⚠️ Google Sheets error: {e}")
-        return None
-
-def sync_students_from_google_sheets():
-    try:
-        client = get_google_sheets_client()
-        if not client:
-            return
-        print("🔄 Syncing students from Google Sheets...")
-        # Add your sync logic here
-        print("✅ Students synced")
-    except Exception as e:
-        print(f"⚠️ Sync error: {e}")
-
-# ====================================================================
-# ROUTES - AUTHENTICATION
+# ROUTES - AUTHENTICATION WITH DROPDOWN
 # ====================================================================
 
 @app.route('/')
@@ -410,20 +489,39 @@ def index():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
+    # Get all student names for dropdown
+    student_list = get_all_student_names()
+    
     if request.method == 'POST':
-        username = request.form['username'].strip()
-        password = request.form['password'].strip()
+        # Get student name from dropdown
+        student_id = request.form.get('student_id')
+        password = request.form.get('password', '').strip()
+        
+        # Also support username input for teachers
+        username = request.form.get('username', '').strip()
         
         try:
             conn = get_db_connection()
             if not conn:
                 flash('Database error. Please try again.', 'error')
-                return render_template_string(LOGIN_TEMPLATE)
+                return render_template_string(LOGIN_TEMPLATE, student_list=student_list)
             
-            user = conn.execute(
-                'SELECT * FROM students WHERE name = ? OR roll_no = ? OR email = ? OR LOWER(name) = LOWER(?)',
-                (username, username, username, username)
-            ).fetchone()
+            # If student_id is selected from dropdown
+            if student_id:
+                user = conn.execute(
+                    'SELECT * FROM students WHERE id = ?',
+                    (student_id,)
+                ).fetchone()
+            # If username is entered (for teachers)
+            elif username:
+                user = conn.execute(
+                    'SELECT * FROM students WHERE name = ? OR roll_no = ? OR email = ? OR LOWER(name) = LOWER(?)',
+                    (username, username, username, username)
+                ).fetchone()
+            else:
+                flash('Please select a student or enter your name', 'error')
+                return render_template_string(LOGIN_TEMPLATE, student_list=student_list)
+            
             conn.close()
             
             if user and check_password_hash(user['password_hash'], password.lower()):
@@ -439,12 +537,13 @@ def login():
                 else:
                     return redirect(url_for('student_dashboard'))
             else:
-                flash('Invalid credentials. Use Name/Roll Number and Mother\'s Name.', 'error')
+                flash('Invalid password. Please check your Mother\'s Name.', 'error')
+                
         except Exception as e:
             print(f"❌ Login error: {e}")
             flash('Login error. Please try again.', 'error')
     
-    return render_template_string(LOGIN_TEMPLATE)
+    return render_template_string(LOGIN_TEMPLATE, student_list=student_list)
 
 LOGIN_TEMPLATE = '''
 <!DOCTYPE html>
@@ -455,12 +554,14 @@ LOGIN_TEMPLATE = '''
     <style>
         *{margin:0;padding:0;box-sizing:border-box;}
         body{font-family:Segoe UI,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;display:flex;justify-content:center;align-items:center;padding:20px;}
-        .container{background:white;border-radius:20px;padding:40px;width:100%;max-width:450px;box-shadow:0 20px 60px rgba(0,0,0,0.3);}
+        .container{background:white;border-radius:20px;padding:40px;width:100%;max-width:500px;box-shadow:0 20px 60px rgba(0,0,0,0.3);}
         .logo{text-align:center;margin-bottom:30px;}
         .logo h1{color:#333;font-size:24px;}
         .logo p{color:#666;font-size:14px;}
         .form-group{margin-bottom:20px;}
         label{display:block;margin-bottom:8px;font-weight:500;color:#333;font-size:14px;}
+        select{width:100%;padding:12px 15px;border:2px solid #e0e0e0;border-radius:10px;font-size:16px;background:white;appearance:none;}
+        select:focus{outline:none;border-color:#667eea;}
         input{width:100%;padding:12px 15px;border:2px solid #e0e0e0;border-radius:10px;font-size:16px;}
         input:focus{outline:none;border-color:#667eea;}
         button{width:100%;padding:14px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;border:none;border-radius:10px;font-size:16px;font-weight:600;cursor:pointer;}
@@ -473,6 +574,9 @@ LOGIN_TEMPLATE = '''
         .badge-physics{background:#4299e1;color:white;}
         .badge-chemistry{background:#ed8936;color:white;}
         .badge-maths{background:#9f7aea;color:white;}
+        .divider{text-align:center;padding:15px 0;color:#999;font-size:13px;}
+        .divider span{background:white;padding:0 15px;}
+        .teacher-section{border-top:2px solid #e0e0e0;padding-top:20px;margin-top:10px;}
     </style>
 </head>
 <body>
@@ -485,17 +589,46 @@ LOGIN_TEMPLATE = '''
             {% endfor %}
         {% endif %}
     {% endwith %}
+    
     <form method="POST">
-        <div class="form-group"><label>📝 Username</label><input type="text" name="username" placeholder="Name or Roll No" required></div>
-        <div class="form-group"><label>🔑 Password</label><input type="password" name="password" placeholder="Mother's Name" required></div>
+        <div class="form-group">
+            <label>👨‍🎓 Select Your Name</label>
+            <select name="student_id" required>
+                <option value="">-- Select Student --</option>
+                {% for student in student_list %}
+                <option value="{{ student.id }}">{{ student.name }} ({{ student.roll_no }})</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>🔑 Password (Mother's Name)</label>
+            <input type="password" name="password" placeholder="Enter your mother's name" required>
+        </div>
         <button type="submit">🔓 Login</button>
     </form>
-    <div class="info-text">
-        <strong>👨‍🎓 Students:</strong> Name or Roll No / Mother's Name<br>
-        <strong>👨‍🏫 Teachers:</strong><br>
-        <span class="badge badge-physics">Physics</span> physics_teacher / physics_teacher<br>
-        <span class="badge badge-chemistry">Chemistry</span> chemistry_teacher / chemistry_teacher<br>
-        <span class="badge badge-maths">Mathematics</span> maths_teacher / maths_teacher
+    
+    <div class="divider"><span>OR</span></div>
+    
+    <div class="teacher-section">
+        <p style="font-size:13px;color:#666;text-align:center;margin-bottom:10px;">
+            <strong>👨‍🏫 Teachers Login Here:</strong>
+        </p>
+        <form method="POST">
+            <div class="form-group">
+                <label>📝 Username</label>
+                <input type="text" name="username" placeholder="physics_teacher / chemistry_teacher / maths_teacher">
+            </div>
+            <div class="form-group">
+                <label>🔑 Password</label>
+                <input type="password" name="password" placeholder="Same as username">
+            </div>
+            <button type="submit">🔓 Teacher Login</button>
+        </form>
+        <div style="margin-top:10px;font-size:12px;color:#666;text-align:center;">
+            <span class="badge badge-physics">Physics</span> physics_teacher<br>
+            <span class="badge badge-chemistry">Chemistry</span> chemistry_teacher<br>
+            <span class="badge badge-maths">Mathematics</span> maths_teacher
+        </div>
     </div>
 </div>
 </body>
@@ -709,6 +842,7 @@ def teacher_dashboard():
         .header h1{font-size:22px;color:#333;}
         .btn-group{display:flex;gap:10px;flex-wrap:wrap;}
         .btn-message{background:#667eea;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;text-decoration:none;display:inline-block;}
+        .btn-sync{background:#48bb78;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;text-decoration:none;display:inline-block;}
         .btn-logout{background:#dc3545;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;}
         .badge{background:#e53e3e;color:white;padding:2px 8px;border-radius:10px;font-size:12px;margin-left:5px;}
         .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:20px;margin-bottom:25px;}
@@ -737,6 +871,7 @@ def teacher_dashboard():
         <div class="header">
             <div><h1>📖 {{ subject }}</h1><p>Welcome, {{ session.user_name }}!</p></div>
             <div class="btn-group">
+                <a href="/teacher/sync" class="btn-sync">🔄 Sync Data</a>
                 <a href="/teacher/messages" class="btn-message">💬 Messages <span class="badge">{{ unread_count }}</span></a>
                 <button class="btn-logout" onclick="location.href='/logout'">🚪 Logout</button>
             </div>
@@ -834,8 +969,18 @@ def teacher_update_status():
     
     return redirect(url_for('teacher_dashboard'))
 
+@app.route('/teacher/sync')
+@teacher_required
+def sync_data():
+    try:
+        sync_students_from_google_sheets()
+        flash('✅ Data synced from Google Sheets!', 'success')
+    except Exception as e:
+        flash(f'⚠️ Error syncing: {str(e)}', 'error')
+    return redirect(url_for('teacher_dashboard'))
+
 # ====================================================================
-# MESSAGING
+# MESSAGING (Simplified - Same as before)
 # ====================================================================
 
 @app.route('/teacher/messages')
@@ -910,8 +1055,6 @@ def teacher_messages():
                     <div class="message {% if msg.from_id == session.user_id %}sent{% else %}received{% endif %}">
                         <div class="message-header"><span><strong>{{ msg.from_name }}</strong> → {{ msg.to_name }}</span><span>{{ msg.created_at[:16] }}</span></div>
                         <div class="message-body"><strong>{{ msg.subject }}</strong><br>{{ msg.message }}</div>
-                        {% if msg.to_id == session.user_id and msg.is_read == 0 %}
-                        <form method="POST" action="/teacher/mark_read" style="margin-top:5px;"><input type="hidden" name="message_id" value="{{ msg.id }}"><button type="submit" style="padding:3px 10px;background:#667eea;color:white;border:none;border-radius:4px;cursor:pointer;font-size:11px;">✓ Mark Read</button></form>{% endif %}
                     </div>
                     {% endfor %}
                     <div class="message-reply">
@@ -944,13 +1087,6 @@ def teacher_send_message():
 def teacher_send_reply():
     send_message(session['user_id'], request.form['to_id'], request.form['subject'], request.form['message'])
     flash('Reply sent!', 'success')
-    return redirect(url_for('teacher_messages'))
-
-@app.route('/teacher/mark_read', methods=['POST'])
-@teacher_required
-def teacher_mark_read():
-    mark_message_read(request.form['message_id'])
-    flash('Marked as read', 'success')
     return redirect(url_for('teacher_messages'))
 
 @app.route('/student/messages')
@@ -1033,8 +1169,6 @@ def student_messages():
                     <div class="message {% if msg.from_id == session.user_id %}sent{% else %}received{% endif %}">
                         <div class="message-header"><span><strong>{{ msg.from_name }}</strong> → {{ msg.to_name }}</span><span>{{ msg.created_at[:16] }}</span></div>
                         <div class="message-body"><strong>{{ msg.subject }}</strong><br>{{ msg.message }}</div>
-                        {% if msg.to_id == session.user_id and msg.is_read == 0 %}
-                        <form method="POST" action="/student/mark_read" style="margin-top:5px;"><input type="hidden" name="message_id" value="{{ msg.id }}"><button type="submit" style="padding:3px 10px;background:#667eea;color:white;border:none;border-radius:4px;cursor:pointer;font-size:11px;">✓ Mark Read</button></form>{% endif %}
                     </div>
                     {% endfor %}
                     <div class="message-reply">
@@ -1073,13 +1207,6 @@ def student_send_reply():
     flash('Reply sent!', 'success')
     return redirect(url_for('student_messages'))
 
-@app.route('/student/mark_read', methods=['POST'])
-@login_required
-def student_mark_read():
-    mark_message_read(request.form['message_id'])
-    flash('Marked as read', 'success')
-    return redirect(url_for('student_messages'))
-
 # ====================================================================
 # HEALTH CHECK
 # ====================================================================
@@ -1101,7 +1228,7 @@ def health_check():
 if __name__ == '__main__':
     print("=" * 60)
     print("🎓 Bakliwal Tutorials Portal Running!")
-    print("👤 Test Students: KETKI KULKARNI / Varsha")
+    print("👤 Students: Select from dropdown, password = Mother's Name")
     print("👨‍🏫 Teachers: physics_teacher / physics_teacher")
     print("=" * 60)
     port = int(os.environ.get('PORT', 5000))
