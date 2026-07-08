@@ -1,6 +1,6 @@
 # ====================================================================
 # BAKLIWAL TUTORIALS - COMPLETE STUDENT PORTAL
-# WITH FULL GOOGLE SHEETS SYNC
+# WITH EXERCISE TRACKER + MARKS DASHBOARD + MESSAGING
 # ====================================================================
 
 import os
@@ -12,15 +12,13 @@ from flask import Flask, render_template_string, request, redirect, url_for, ses
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# ====================================================================
-# CONFIGURATION
-# ====================================================================
-
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-this')
 
+# Database
 DB_PATH = os.path.join(tempfile.gettempdir(), 'students.db')
 
+# Google Sheets
 SHEET_NAME = os.environ.get('SHEET_NAME', 'Master Sheet')
 GOOGLE_CREDENTIALS_JSON = os.environ.get('GOOGLE_CREDENTIALS_JSON')
 
@@ -28,18 +26,16 @@ print(f"✅ Starting Bakliwal Portal")
 print(f"📊 Database path: {DB_PATH}")
 print(f"📝 Sheet name: {SHEET_NAME}")
 
-# Try to import Google Sheets
+# Try Google Sheets
 try:
     import gspread
     from oauth2client.service_account import ServiceAccountCredentials
     HAS_GSHEETS = True
-    print("✅ Google Sheets loaded")
 except ImportError:
     HAS_GSHEETS = False
-    print("⚠️ Google Sheets not available")
 
 # ====================================================================
-# DATABASE SETUP
+# DATABASE
 # ====================================================================
 
 def get_db_connection():
@@ -48,7 +44,7 @@ def get_db_connection():
         conn.row_factory = sqlite3.Row
         return conn
     except Exception as e:
-        print(f"❌ Database connection error: {e}")
+        print(f"❌ DB error: {e}")
         return None
 
 def init_db():
@@ -57,10 +53,9 @@ def init_db():
         conn = get_db_connection()
         if not conn:
             return False
-            
         cursor = conn.cursor()
 
-        # Create all tables
+        # Students
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS students (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,6 +72,7 @@ def init_db():
             )
         ''')
 
+        # Exercises
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS exercises (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,6 +85,7 @@ def init_db():
             )
         ''')
 
+        # Progress
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS progress (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -102,6 +99,7 @@ def init_db():
             )
         ''')
 
+        # Messages
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,6 +113,7 @@ def init_db():
             )
         ''')
 
+        # Test Results
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS test_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,55 +135,52 @@ def init_db():
             )
         ''')
 
-        # Add default teachers
-        cursor.execute('SELECT COUNT(*) as count FROM students WHERE is_teacher = 1')
-        if cursor.fetchone()[0] == 0:
-            print("📝 Adding default teachers...")
-            teachers = [
-                ('Physics Teacher', 'physics_teacher', 'physics@school.com', 'Physics'),
-                ('Chemistry Teacher', 'chemistry_teacher', 'chemistry@school.com', 'Chemistry'),
-                ('Mathematics Teacher', 'maths_teacher', 'maths@school.com', 'Mathematics')
-            ]
-            for name, username, email, subject in teachers:
+        # Add teachers
+        teachers = [
+            ('Physics Teacher', 'physics_teacher', 'physics@school.com', 'Physics'),
+            ('Chemistry Teacher', 'chemistry_teacher', 'chemistry@school.com', 'Chemistry'),
+            ('Mathematics Teacher', 'maths_teacher', 'maths@school.com', 'Mathematics')
+        ]
+        for name, username, email, subject in teachers:
+            cursor.execute('SELECT id FROM students WHERE email = ?', (email,))
+            if not cursor.fetchone():
                 password_hash = generate_password_hash(username)
                 cursor.execute('''
                     INSERT INTO students (name, roll_no, mother_name, email, password_hash, is_teacher, subject)
                     VALUES (?, ?, ?, ?, ?, 1, ?)
                 ''', (name, username, 'teacher', email, password_hash, subject))
 
-        # Add sample exercises
+        # Add exercises
         cursor.execute('SELECT COUNT(*) as count FROM exercises')
         if cursor.fetchone()[0] == 0:
-            print("📝 Adding sample exercises...")
-            sample_exercises = [
-                ('Physics', 'Chapter 1: Motion', 'Exercise 1.1 - Speed'),
-                ('Physics', 'Chapter 1: Motion', 'Exercise 1.2 - Acceleration'),
-                ('Chemistry', 'Chapter 1: Atoms', 'Exercise 1.1 - Atomic Structure'),
-                ('Chemistry', 'Chapter 1: Atoms', 'Exercise 1.2 - Periodic Table'),
-                ('Mathematics', 'Chapter 1: Algebra', 'Exercise 1.1 - Linear Equations'),
-                ('Mathematics', 'Chapter 1: Algebra', 'Exercise 1.2 - Quadratic Equations')
+            exercises = [
+                ('Physics', 'Chapter 1: Motion', 'Ex 1.1 - Speed'),
+                ('Physics', 'Chapter 1: Motion', 'Ex 1.2 - Acceleration'),
+                ('Physics', 'Chapter 2: Force', 'Ex 2.1 - Newton\'s Laws'),
+                ('Chemistry', 'Chapter 1: Atoms', 'Ex 1.1 - Atomic Structure'),
+                ('Chemistry', 'Chapter 1: Atoms', 'Ex 1.2 - Periodic Table'),
+                ('Chemistry', 'Chapter 2: Reactions', 'Ex 2.1 - Chemical Equations'),
+                ('Mathematics', 'Chapter 1: Algebra', 'Ex 1.1 - Linear Equations'),
+                ('Mathematics', 'Chapter 1: Algebra', 'Ex 1.2 - Quadratic Equations'),
+                ('Mathematics', 'Chapter 2: Calculus', 'Ex 2.1 - Derivatives'),
             ]
-            for subject, chapter, exercise_name in sample_exercises:
-                cursor.execute('''
-                    INSERT OR IGNORE INTO exercises (subject, chapter, exercise_name)
-                    VALUES (?, ?, ?)
-                ''', (subject, chapter, exercise_name))
+            for subject, chapter, name in exercises:
+                cursor.execute('INSERT OR IGNORE INTO exercises (subject, chapter, exercise_name) VALUES (?, ?, ?)',
+                              (subject, chapter, name))
 
         conn.commit()
         conn.close()
-        print("✅ Database initialized successfully!")
+        print("✅ Database initialized!")
         return True
     except Exception as e:
-        print(f"❌ Database init error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ DB init error: {e}")
         return False
 
 # ====================================================================
-# GOOGLE SHEETS SYNC - COMPLETE
+# GOOGLE SHEETS SYNC
 # ====================================================================
 
-def get_google_sheets_client():
+def get_gs_client():
     if not HAS_GSHEETS or not GOOGLE_CREDENTIALS_JSON:
         return None
     try:
@@ -193,97 +189,77 @@ def get_google_sheets_client():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         return gspread.authorize(creds)
     except Exception as e:
-        print(f"⚠️ Google Sheets error: {e}")
+        print(f"⚠️ GS error: {e}")
         return None
 
-def sync_all_from_google_sheets():
-    """Complete sync: Students + Mother Names + Test Results"""
-    print("🔄 Starting full Google Sheets sync...")
+def sync_all():
+    """Full sync - returns (student_count, error_message)"""
+    print("🔄 Starting full sync...")
     
-    client = get_google_sheets_client()
+    client = get_gs_client()
     if not client:
-        print("⚠️ Google Sheets client not available")
-        return False
-
+        return 0, "Google Sheets not available. Check GOOGLE_CREDENTIALS_JSON."
+    
     try:
         spreadsheet = client.open(SHEET_NAME)
         
-        # ============================================================
-        # 1. SYNC MOTHER NAMES
-        # ============================================================
-        print("📋 Reading Mother Names...")
-        mother_sheet = spreadsheet.worksheet('Mother Name')
-        mother_data = mother_sheet.get_all_values()
-        mother_dict = {}
-        
-        # Skip header row
-        for row in mother_data[1:]:
-            if len(row) >= 2:
-                student_name = row[0].strip().upper()
-                mother_name = row[1].strip()
-                if student_name and mother_name:
-                    mother_dict[student_name] = mother_name
-        
-        print(f"   ✅ Found {len(mother_dict)} mother names")
+        # Get mother names
+        print("📋 Reading Mother Name sheet...")
+        try:
+            mother_sheet = spreadsheet.worksheet('Mother Name')
+            mother_data = mother_sheet.get_all_values()
+            mother_dict = {}
+            for row in mother_data[1:]:
+                if len(row) >= 2 and row[0].strip():
+                    mother_dict[row[0].strip().upper()] = row[1].strip()
+            print(f"   Found {len(mother_dict)} mother names")
+        except Exception as e:
+            print(f"   ⚠️ Mother Name sheet error: {e}")
+            mother_dict = {}
 
-        # ============================================================
-        # 2. SYNC STUDENTS FROM SHEET20
-        # ============================================================
+        # Get students from Sheet20
         print("📋 Reading Sheet20...")
         sheet20 = spreadsheet.worksheet('Sheet20')
         data = sheet20.get_all_values()
-        
         if len(data) < 2:
-            print("⚠️ No data in Sheet20")
-            return False
-
+            return 0, "Sheet20 is empty"
+        
         headers = data[0]
         name_idx = headers.index('NAME') if 'NAME' in headers else -1
         roll_idx = headers.index('ROLL NO') if 'ROLL NO' in headers else -1
         batch_idx = headers.index('BATCH') if 'BATCH' in headers else -1
         branch_idx = headers.index('BRANCH') if 'BRANCH' in headers else -1
-
-        if roll_idx == -1:
-            print("⚠️ ROLL NO column not found")
-            return False
-
+        
+        if roll_idx == -1 or name_idx == -1:
+            return 0, "Required columns not found in Sheet20"
+        
         conn = get_db_connection()
         if not conn:
-            return False
+            return 0, "Database connection failed"
         cursor = conn.cursor()
-
-        # Clear existing students (keep teachers)
-        cursor.execute('DELETE FROM students WHERE is_teacher = 0')
         
-        # Also clear progress for students
+        # Clear non-teacher students
+        cursor.execute('DELETE FROM students WHERE is_teacher = 0')
         cursor.execute('DELETE FROM progress')
         
-        student_count = 0
-        exercise_count = 0
-
-        # Get all exercises for assigning to students
+        # Get exercises for assignment
         cursor.execute('SELECT id FROM exercises')
-        exercises = cursor.fetchall()
-        exercise_ids = [ex[0] for ex in exercises]
-
+        exercise_ids = [row[0] for row in cursor.fetchall()]
+        
+        student_count = 0
         for row in data[1:]:
             if len(row) <= max(roll_idx, name_idx):
                 continue
-
             roll_no = str(row[roll_idx]).strip()
             if not roll_no:
                 continue
-
+            
             name = str(row[name_idx]).strip() if name_idx != -1 else 'Student'
             batch = str(row[batch_idx]).strip() if batch_idx != -1 else ''
             branch = str(row[branch_idx]).strip() if branch_idx != -1 else ''
-            
-            # Get mother name from dictionary (case-insensitive)
             mother_name = mother_dict.get(name.upper(), 'password')
-            
-            # Create password hash (lowercase for case-insensitive login)
             password_hash = generate_password_hash(mother_name.lower())
-
+            
             cursor.execute('''
                 INSERT INTO students (name, roll_no, mother_name, batch, branch, password_hash, is_teacher)
                 VALUES (?, ?, ?, ?, ?, ?, 0)
@@ -292,168 +268,201 @@ def sync_all_from_google_sheets():
             student_id = cursor.lastrowid
             student_count += 1
             
-            # Assign exercises to this student
             for ex_id in exercise_ids:
                 cursor.execute('''
                     INSERT OR IGNORE INTO progress (student_id, exercise_id, status, discussed)
                     VALUES (?, ?, 'pending', 'no')
                 ''', (student_id, ex_id))
-                exercise_count += 1
-
-        conn.commit()
-        conn.close()
-        print(f"   ✅ Synced {student_count} students with {exercise_count} exercise assignments")
-
-        # ============================================================
-        # 3. SYNC TEST RESULTS
-        # ============================================================
-        print("📋 Syncing test results...")
-        all_sheets = spreadsheet.worksheets()
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        # Sync test results
+        print("📋 Syncing test results...")
         test_count = 0
-
-        for sheet in all_sheets:
+        for sheet in spreadsheet.worksheets():
             sheet_name = sheet.title
-            
-            # Skip non-test sheets
             if sheet_name in ['Sheet20', 'Mother Name', 'Sheet1'] or sheet_name.startswith('Sheet'):
                 continue
-
-            print(f"   📄 Processing: {sheet_name}")
+            
             data = sheet.get_all_values()
             if len(data) < 10:
                 continue
-
-            # Find header row
+            
             header_row = -1
             for i in range(min(20, len(data))):
                 if data[i] and data[i][0] == 'TOTAL RANK':
                     header_row = i
                     break
-
             if header_row == -1:
                 continue
-
+            
             headers = data[header_row]
-            rank_idx = headers.index('TOTAL RANK') if 'TOTAL RANK' in headers else -1
             roll_idx = headers.index('ROLL NO.') if 'ROLL NO.' in headers else -1
+            rank_idx = headers.index('TOTAL RANK') if 'TOTAL RANK' in headers else -1
             phy_idx = headers.index('PHY') if 'PHY' in headers else -1
             chem_idx = headers.index('CHEM') if 'CHEM' in headers else -1
             maths_idx = headers.index('MATHS') if 'MATHS' in headers else -1
             total_idx = headers.index('TOTAL') if 'TOTAL' in headers else -1
-
+            
             if roll_idx == -1:
                 continue
-
-            # Determine test type
+            
             is_brtest = sheet_name.upper().startswith('BRTEST')
             max_phy = 50 if is_brtest else 100
             max_chem = 50 if is_brtest else 100
             max_maths = 100
             max_total = max_phy + max_chem + max_maths
-
-            # Get max marks from sheet
-            if len(data) > header_row + 2 and data[header_row + 2][1] == 'MAX':
-                if len(data[header_row + 2]) > 3:
-                    max_phy = float(data[header_row + 2][3]) if data[header_row + 2][3] else max_phy
-                if len(data[header_row + 2]) > 5:
-                    max_chem = float(data[header_row + 2][5]) if data[header_row + 2][5] else max_chem
-                if len(data[header_row + 2]) > 7:
-                    max_maths = float(data[header_row + 2][7]) if data[header_row + 2][7] else max_maths
-                if len(data[header_row + 2]) > 9:
-                    max_total = float(data[header_row + 2][9]) if data[header_row + 2][9] else max_total
-
+            
             test_name = sheet_name.replace('BATCH ', '').replace('BTEST', 'Test')
             test_name = test_name.replace('GRAND TEST', 'Grand Test').replace('BRTEST', 'CET Test')
-
+            
             for row in data[header_row + 1:]:
                 if len(row) <= roll_idx:
                     continue
-
                 roll_no = str(row[roll_idx]).strip()
                 if not roll_no:
                     continue
-
+                
                 cursor.execute('SELECT id FROM students WHERE roll_no = ?', (roll_no,))
                 student = cursor.fetchone()
                 if not student:
                     continue
-
-                student_id = student[0]
-
+                
                 try:
-                    phy_marks = float(row[phy_idx]) if phy_idx != -1 and row[phy_idx] else 0
+                    phy = float(row[phy_idx]) if phy_idx != -1 and row[phy_idx] else 0
                 except:
-                    phy_marks = 0
+                    phy = 0
                 try:
-                    chem_marks = float(row[chem_idx]) if chem_idx != -1 and row[chem_idx] else 0
+                    chem = float(row[chem_idx]) if chem_idx != -1 and row[chem_idx] else 0
                 except:
-                    chem_marks = 0
+                    chem = 0
                 try:
-                    maths_marks = float(row[maths_idx]) if maths_idx != -1 and row[maths_idx] else 0
+                    maths = float(row[maths_idx]) if maths_idx != -1 and row[maths_idx] else 0
                 except:
-                    maths_marks = 0
+                    maths = 0
                 try:
-                    total_marks = float(row[total_idx]) if total_idx != -1 and row[total_idx] else 0
+                    total = float(row[total_idx]) if total_idx != -1 and row[total_idx] else 0
                 except:
-                    total_marks = phy_marks + chem_marks + maths_marks
-
+                    total = phy + chem + maths
+                
                 rank = str(row[rank_idx]) if rank_idx != -1 and row[rank_idx] else '-'
-                percentage = (total_marks / max_total * 100) if max_total > 0 else 0
-
+                percentage = (total / max_total * 100) if max_total > 0 else 0
+                
                 cursor.execute('''
                     INSERT OR REPLACE INTO test_results 
                     (student_id, test_name, test_type, rank, 
                      physics_marks, physics_max, chemistry_marks, chemistry_max, 
                      maths_marks, maths_max, total_marks, total_max, percentage, test_date)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ''', (student_id, test_name, 'CET' if is_brtest else 'Mains',
-                      rank, phy_marks, max_phy, chem_marks, max_chem,
-                      maths_marks, max_maths, total_marks, max_total, percentage))
+                ''', (student[0], test_name, 'CET' if is_brtest else 'Mains',
+                      rank, phy, max_phy, chem, max_chem, maths, max_maths,
+                      total, max_total, percentage))
                 test_count += 1
-
+        
         conn.commit()
         conn.close()
-        print(f"   ✅ Synced {test_count} test results")
-
-        # ============================================================
-        # 4. VERIFY
-        # ============================================================
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) as count FROM students WHERE is_teacher = 0')
-        student_count = cursor.fetchone()[0]
-        cursor.execute('SELECT COUNT(*) as count FROM test_results')
-        test_count = cursor.fetchone()[0]
-        conn.close()
+        print(f"✅ Synced {student_count} students, {test_count} test results")
+        return student_count, None
         
-        print(f"✅ Sync complete! {student_count} students, {test_count} test results")
-        return True
-
     except Exception as e:
         print(f"❌ Sync error: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        return 0, f"Sync error: {str(e)}"
 
 # ====================================================================
-# INITIALIZE DATABASE AND SYNC ON STARTUP
+# SEED DATA (Fallback if sync fails)
+# ====================================================================
+
+def seed_demo_data():
+    """Add demo students if no students exist"""
+    conn = get_db_connection()
+    if not conn:
+        return
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT COUNT(*) as count FROM students WHERE is_teacher = 0')
+    if cursor.fetchone()[0] > 0:
+        conn.close()
+        return
+    
+    print("📝 Seeding demo data...")
+    demo_students = [
+        ('KETKI KULKARNI', '23000010', 'Varsha', 'WOW', 'JS'),
+        ('KARTIK KULKARNI', '23000009', 'Smita', 'WOW', 'JS'),
+        ('JAYRAJ HUGAR', '23000008', 'Jayashri', 'WOW', 'JS'),
+        ('OJAS HUMNABADKAR', '25800325', 'Pratibha', 'WOW', 'JS'),
+        ('SATVIKA MORE', '23000017', 'Manisha', 'WOW', 'JS'),
+        ('ANIMESH CHAVAN', '23000004', 'Varsha', 'WOW', 'JS'),
+        ('PIYUSH PAWAR', '25800415', 'Archana', 'WOW', 'JS'),
+        ('ARNAV THITE', '26850027', 'Shriya', 'WOW', 'JS'),
+        ('SAYALI MADALE', '23000024', 'Savita', 'WOW', 'JS'),
+        ('SHRAVNI GIRAM', '27337339', 'Jyoti', 'WOW', 'JS'),
+    ]
+    
+    cursor.execute('SELECT id FROM exercises')
+    exercise_ids = [row[0] for row in cursor.fetchall()]
+    
+    for name, roll, mother, batch, branch in demo_students:
+        password_hash = generate_password_hash(mother.lower())
+        cursor.execute('''
+            INSERT INTO students (name, roll_no, mother_name, batch, branch, password_hash, is_teacher)
+            VALUES (?, ?, ?, ?, ?, ?, 0)
+        ''', (name, roll, mother, batch, branch, password_hash))
+        student_id = cursor.lastrowid
+        for ex_id in exercise_ids:
+            cursor.execute('''
+                INSERT OR IGNORE INTO progress (student_id, exercise_id, status, discussed)
+                VALUES (?, ?, 'pending', 'no')
+            ''', (student_id, ex_id))
+    
+    # Add sample test results
+    for i, student in enumerate(demo_students[:5], 1):
+        cursor.execute('SELECT id FROM students WHERE roll_no = ?', (student[1],))
+        s = cursor.fetchone()
+        if s:
+            cursor.execute('''
+                INSERT OR REPLACE INTO test_results 
+                (student_id, test_name, test_type, rank, physics_marks, physics_max, 
+                 chemistry_marks, chemistry_max, maths_marks, maths_max, total_marks, total_max, percentage)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (s[0], f'Test {i}', 'Mains', str(i * 2 + 3), 
+                  85 - i*3, 100, 82 - i*2, 100, 88 - i*2, 100, 
+                  255 - i*7, 300, 85 - (i*7/3)))
+    
+    conn.commit()
+    conn.close()
+    print(f"✅ Seeded {len(demo_students)} demo students")
+
+# ====================================================================
+# INITIALIZE
 # ====================================================================
 
 print("=" * 60)
-print("🚀 Initializing application...")
 init_db()
-print("=" * 60)
 
-# Try to sync from Google Sheets on startup
-print("🔄 Attempting Google Sheets sync...")
-sync_all_from_google_sheets()
+# Try sync
+print("=" * 60)
+count, error = sync_all()
+if count > 0:
+    print(f"✅ Synced {count} students from Google Sheets")
+else:
+    print(f"⚠️ Sync failed: {error}")
+    print("📝 Seeding demo data instead...")
+    seed_demo_data()
+
+# Verify
+conn = get_db_connection()
+if conn:
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) as count FROM students WHERE is_teacher = 0')
+    student_count = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) as count FROM test_results')
+    test_count = cursor.fetchone()[0]
+    conn.close()
+    print(f"📊 Database: {student_count} students, {test_count} test results")
 print("=" * 60)
 
 # ====================================================================
-# HELPER FUNCTIONS
+# HELPERS
 # ====================================================================
 
 def login_required(f):
@@ -474,18 +483,15 @@ def teacher_required(f):
         return f(*args, **kwargs)
     return decorated
 
-def get_all_student_names():
-    """Get all student names for dropdown"""
+def get_all_students():
     try:
         conn = get_db_connection()
         if not conn:
             return []
         students = conn.execute('SELECT id, name, roll_no FROM students WHERE is_teacher = 0 ORDER BY name').fetchall()
         conn.close()
-        print(f"📋 Loaded {len(students)} students for dropdown")
         return [dict(s) for s in students]
-    except Exception as e:
-        print(f"❌ Error loading students: {e}")
+    except:
         return []
 
 def get_unread_count(user_id):
@@ -528,8 +534,7 @@ def get_all_messages(user_id):
         if not conn:
             return []
         messages = conn.execute('''
-            SELECT m.id, m.from_id, m.to_id, m.subject, m.message, m.parent_id, m.is_read, m.created_at,
-                   s.name as from_name, s2.name as to_name
+            SELECT m.*, s.name as from_name, s2.name as to_name
             FROM messages m
             JOIN students s ON m.from_id = s.id
             JOIN students s2 ON m.to_id = s2.id
@@ -577,9 +582,7 @@ def get_test_results(student_id):
         if not conn:
             return []
         results = conn.execute('''
-            SELECT test_name, test_type, rank, physics_marks, physics_max, chemistry_marks, chemistry_max,
-                   maths_marks, maths_max, total_marks, total_max, percentage
-            FROM test_results
+            SELECT * FROM test_results
             WHERE student_id = ?
             ORDER BY test_date DESC
         ''', (student_id,)).fetchall()
@@ -605,7 +608,7 @@ def get_student_stats(student_id):
         return {'total_tests': 0, 'avg_percentage': 0, 'best_rank': None, 'highest_score': 0}
 
 # ====================================================================
-# ROUTES - AUTHENTICATION WITH DROPDOWN
+# ROUTES
 # ====================================================================
 
 @app.route('/')
@@ -614,39 +617,27 @@ def index():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    # Get all student names for dropdown
-    student_list = get_all_student_names()
-    print(f"📋 Login page loaded with {len(student_list)} students")
+    students = get_all_students()
     
     if request.method == 'POST':
-        # Get student name from dropdown
         student_id = request.form.get('student_id')
         password = request.form.get('password', '').strip()
-        
-        # Also support username input for teachers
         username = request.form.get('username', '').strip()
         
         try:
             conn = get_db_connection()
             if not conn:
-                flash('Database error. Please try again.', 'error')
-                return render_template_string(LOGIN_TEMPLATE, student_list=student_list)
+                flash('Database error', 'error')
+                return render_template_string(LOGIN_TEMPLATE, students=students)
             
-            # If student_id is selected from dropdown
             if student_id:
-                user = conn.execute(
-                    'SELECT * FROM students WHERE id = ?',
-                    (student_id,)
-                ).fetchone()
-            # If username is entered (for teachers)
+                user = conn.execute('SELECT * FROM students WHERE id = ?', (student_id,)).fetchone()
             elif username:
-                user = conn.execute(
-                    'SELECT * FROM students WHERE name = ? OR roll_no = ? OR email = ? OR LOWER(name) = LOWER(?)',
-                    (username, username, username, username)
-                ).fetchone()
+                user = conn.execute('SELECT * FROM students WHERE name = ? OR roll_no = ? OR email = ?', 
+                                   (username, username, username)).fetchone()
             else:
                 flash('Please select a student or enter your name', 'error')
-                return render_template_string(LOGIN_TEMPLATE, student_list=student_list)
+                return render_template_string(LOGIN_TEMPLATE, students=students)
             
             conn.close()
             
@@ -663,13 +654,12 @@ def login():
                 else:
                     return redirect(url_for('student_dashboard'))
             else:
-                flash('Invalid password. Please check your Mother\'s Name.', 'error')
-                
+                flash('Invalid password. Use your Mother\'s Name.', 'error')
         except Exception as e:
             print(f"❌ Login error: {e}")
-            flash('Login error. Please try again.', 'error')
+            flash('Login error', 'error')
     
-    return render_template_string(LOGIN_TEMPLATE, student_list=student_list)
+    return render_template_string(LOGIN_TEMPLATE, students=students)
 
 LOGIN_TEMPLATE = '''
 <!DOCTYPE html>
@@ -701,9 +691,8 @@ LOGIN_TEMPLATE = '''
         .badge-chemistry{background:#ed8936;color:white;}
         .badge-maths{background:#9f7aea;color:white;}
         .divider{text-align:center;padding:15px 0;color:#999;font-size:13px;}
-        .divider span{background:white;padding:0 15px;}
         .teacher-section{border-top:2px solid #e0e0e0;padding-top:20px;margin-top:10px;}
-        .student-count{font-size:12px;color:#999;margin-left:10px;}
+        .count-badge{font-size:12px;color:#999;margin-left:10px;}
     </style>
 </head>
 <body>
@@ -719,17 +708,17 @@ LOGIN_TEMPLATE = '''
     
     <form method="POST">
         <div class="form-group">
-            <label>👨‍🎓 Select Your Name <span class="student-count">({{ student_list|length }} students)</span></label>
+            <label>👨‍🎓 Select Your Name <span class="count-badge">({{ students|length }} students)</span></label>
             <select name="student_id" required>
                 <option value="">-- Select Student --</option>
-                {% for student in student_list %}
-                <option value="{{ student.id }}">{{ student.name }} ({{ student.roll_no }})</option>
+                {% for s in students %}
+                <option value="{{ s.id }}">{{ s.name }} ({{ s.roll_no }})</option>
                 {% endfor %}
             </select>
         </div>
         <div class="form-group">
             <label>🔑 Password (Mother's Name)</label>
-            <input type="password" name="password" placeholder="Enter your mother's name (any case)" required>
+            <input type="password" name="password" placeholder="Enter mother's name (any case)" required>
         </div>
         <button type="submit">🔓 Login</button>
     </form>
@@ -769,7 +758,7 @@ def logout():
     return redirect(url_for('login'))
 
 # ====================================================================
-# STUDENT DASHBOARD
+# STUDENT DASHBOARD - COMPLETE
 # ====================================================================
 
 @app.route('/student/dashboard')
@@ -792,11 +781,18 @@ def student_dashboard():
     
     total = len(progress)
     done = sum(1 for p in progress if p['status'] == 'done')
+    discussed = sum(1 for p in progress if p['discussed'] == 'yes')
     
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html>
-    <head><title>Student Dashboard</title>
+    return render_template_string(STUDENT_DASHBOARD_TEMPLATE, 
+        subjects=subjects, total=total, done=done, discussed=discussed,
+        test_results=test_results, stats=stats, unread_count=unread_count)
+
+STUDENT_DASHBOARD_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Student Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         *{margin:0;padding:0;box-sizing:border-box;}
@@ -823,85 +819,154 @@ def student_dashboard():
         th{background:#f8f9fa;font-weight:600;}
         .status-done{background:#48bb78;color:white;padding:3px 8px;border-radius:4px;font-size:11px;}
         .status-pending{background:#f56565;color:white;padding:3px 8px;border-radius:4px;font-size:11px;}
+        .discussed-yes{background:#48bb78;color:white;padding:3px 8px;border-radius:4px;font-size:11px;}
+        .discussed-no{background:#f56565;color:white;padding:3px 8px;border-radius:4px;font-size:11px;}
         .btn-sm{padding:4px 8px;border:none;border-radius:4px;cursor:pointer;font-size:11px;margin:1px;}
         .btn-done{background:#48bb78;color:white;}
         .btn-pending{background:#f56565;color:white;}
+        .btn-discuss-yes{background:#48bb78;color:white;}
+        .btn-discuss-no{background:#f56565;color:white;}
         .rank-badge{padding:2px 10px;border-radius:20px;font-weight:600;font-size:12px;}
         .rank-good{background:#d4edda;color:#155724;}
         .rank-avg{background:#fff3cd;color:#856404;}
         .rank-low{background:#f8d7da;color:#721c24;}
+        .chart-container{height:280px;margin-top:10px;}
+        .progress-bar{background:#e0e0e0;border-radius:10px;overflow:hidden;height:6px;width:100px;}
+        .progress-fill{background:linear-gradient(90deg,#667eea,#764ba2);height:100%;border-radius:10px;}
         @media (max-width:768px){.header{flex-direction:column;align-items:flex-start;gap:15px;}}
     </style>
-    </head>
-    <body>
-    <div class="container">
-        <div class="header">
-            <div><h1>👋 Welcome, {{ session.user_name }}!</h1><p>Roll No: <strong>{{ session.roll_no }}</strong></p></div>
-            <div class="btn-group">
-                <a href="/student/messages" class="btn-message">💬 Messages <span class="badge">{{ unread_count }}</span></a>
-                <button class="btn-logout" onclick="location.href='/logout'">🚪 Logout</button>
-            </div>
-        </div>
-        <div class="stats-grid">
-            <div class="stat-card"><div class="value">{{ done }}/{{ total }}</div><div class="label">Exercises Done</div></div>
-            <div class="stat-card"><div class="value">{{ "%.0f"|format((done/total*100) if total>0 else 0) }}%</div><div class="label">Completion</div></div>
-            <div class="stat-card"><div class="value">{{ stats.total_tests or 0 }}</div><div class="label">Tests Given</div></div>
-            <div class="stat-card"><div class="value">{{ "%.1f"|format(stats.avg_percentage or 0) }}%</div><div class="label">Avg Score</div></div>
-        </div>
-        <div class="section">
-            <div class="section-title">📝 Exercise Progress</div>
-            {% for subject, exercises in subjects.items() %}
-            <div class="subject-title subject-{{ subject.lower() }}">{{ subject }}</div>
-            <table>
-                <thead><tr><th>Chapter</th><th>Exercise</th><th>Status</th><th>Actions</th></tr></thead>
-                <tbody>
-                    {% for ex in exercises %}
-                    <tr>
-                        <td>{{ ex.chapter }}</td>
-                        <td>{{ ex.exercise_name }}</td>
-                        <td><span class="status-{{ ex.status }}">{{ ex.status.upper() }}</span></td>
-                        <td>
-                            <form method="POST" action="/student/update_progress" style="display:inline;">
-                                <input type="hidden" name="exercise_id" value="{{ ex.exercise_id }}">
-                                <button type="submit" name="status" value="done" class="btn-sm btn-done">✓ Done</button>
-                                <button type="submit" name="status" value="pending" class="btn-sm btn-pending">○ Pending</button>
-                            </form>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-            {% endfor %}
-        </div>
-        <div class="section">
-            <div class="section-title">📋 Test Results</div>
-            {% if test_results|length > 0 %}
-            <table>
-                <thead><tr><th>Test</th><th>Rank</th><th>Physics</th><th>Chemistry</th><th>Maths</th><th>Total</th><th>%</th></tr></thead>
-                <tbody>
-                    {% for r in test_results %}
-                    {% set rank_num = r.rank|int if r.rank != '-' and r.rank else 999 %}
-                    {% set rank_class = 'rank-good' if rank_num <= 50 else ('rank-avg' if rank_num <= 100 else 'rank-low') %}
-                    <tr>
-                        <td>{{ r.test_name }}</td>
-                        <td><span class="rank-badge {{ rank_class }}">#{{ r.rank }}</span></td>
-                        <td>{{ "%.0f"|format(r.physics_marks) }}/{{ "%.0f"|format(r.physics_max) }}</td>
-                        <td>{{ "%.0f"|format(r.chemistry_marks) }}/{{ "%.0f"|format(r.chemistry_max) }}</td>
-                        <td>{{ "%.0f"|format(r.maths_marks) }}/{{ "%.0f"|format(r.maths_max) }}</td>
-                        <td><strong>{{ "%.0f"|format(r.total_marks) }}</strong>/{{ "%.0f"|format(r.total_max) }}</td>
-                        <td>{{ "%.1f"|format(r.percentage) }}%</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-            {% else %}
-            <p style="padding:20px;color:#666;">No test results available yet.</p>
-            {% endif %}
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <div><h1>👋 Welcome, {{ session.user_name }}!</h1><p>Roll No: <strong>{{ session.roll_no }}</strong></p></div>
+        <div class="btn-group">
+            <a href="/student/messages" class="btn-message">💬 Messages <span class="badge">{{ unread_count }}</span></a>
+            <button class="btn-logout" onclick="location.href='/logout'">🚪 Logout</button>
         </div>
     </div>
-    </body>
-    </html>
-    ''', subjects=subjects, total=total, done=done, test_results=test_results, stats=stats, unread_count=unread_count)
+    
+    <div class="stats-grid">
+        <div class="stat-card"><div class="value">{{ done }}/{{ total }}</div><div class="label">Exercises Done</div></div>
+        <div class="stat-card"><div class="value">{{ "%.0f"|format((done/total*100) if total>0 else 0) }}%</div><div class="label">Completion</div></div>
+        <div class="stat-card"><div class="value">{{ stats.total_tests or 0 }}</div><div class="label">Tests Given</div></div>
+        <div class="stat-card"><div class="value">{{ "%.1f"|format(stats.avg_percentage or 0) }}%</div><div class="label">Avg Score</div></div>
+    </div>
+    
+    {% if test_results|length > 0 %}
+    <div class="section">
+        <div class="section-title">📊 Performance Trend</div>
+        <div class="chart-container"><canvas id="perfChart"></canvas></div>
+    </div>
+    {% endif %}
+    
+    <div class="section">
+        <div class="section-title">📝 Exercise Progress</div>
+        {% for subject, exercises in subjects.items() %}
+        <div class="subject-title subject-{{ subject.lower() }}">{{ subject }}</div>
+        <table>
+            <thead><tr><th>Chapter</th><th>Exercise</th><th>Status</th><th>Discussed</th><th>Teacher Comment</th><th>Actions</th></tr></thead>
+            <tbody>
+                {% for ex in exercises %}
+                <tr>
+                    <td>{{ ex.chapter }}</td>
+                    <td>{{ ex.exercise_name }}</td>
+                    <td><span class="status-{{ ex.status }}">{{ ex.status.upper() }}</span></td>
+                    <td><span class="discussed-{{ ex.discussed }}">{{ ex.discussed.upper() }}</span></td>
+                    <td>{{ ex.teacher_comment or 'No comment' }}</td>
+                    <td>
+                        <form method="POST" action="/student/update_progress" style="display:inline;">
+                            <input type="hidden" name="exercise_id" value="{{ ex.exercise_id }}">
+                            <input type="hidden" name="action" value="status">
+                            <button type="submit" name="status" value="done" class="btn-sm btn-done">✓ Done</button>
+                            <button type="submit" name="status" value="pending" class="btn-sm btn-pending">○ Pending</button>
+                        </form>
+                        <form method="POST" action="/student/update_progress" style="display:inline;">
+                            <input type="hidden" name="exercise_id" value="{{ ex.exercise_id }}">
+                            <input type="hidden" name="action" value="discussed">
+                            <button type="submit" name="discussed" value="yes" class="btn-sm btn-discuss-yes">📚 Yes</button>
+                            <button type="submit" name="discussed" value="no" class="btn-sm btn-discuss-no">📚 No</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endfor %}
+    </div>
+    
+    <div class="section">
+        <div class="section-title">📋 Test Results</div>
+        {% if test_results|length > 0 %}
+        <table>
+            <thead><tr><th>Test</th><th>Type</th><th>Rank</th><th>Physics</th><th>Chemistry</th><th>Maths</th><th>Total</th><th>%</th></tr></thead>
+            <tbody>
+                {% for r in test_results %}
+                {% set rank_num = r.rank|int if r.rank != '-' and r.rank else 999 %}
+                {% set rank_class = 'rank-good' if rank_num <= 50 else ('rank-avg' if rank_num <= 100 else 'rank-low') %}
+                <tr>
+                    <td><strong>{{ r.test_name }}</strong></td>
+                    <td><span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;background:#667eea;color:white;">{{ r.test_type or 'Mains' }}</span></td>
+                    <td><span class="rank-badge {{ rank_class }}">#{{ r.rank if r.rank != '-' else '-' }}</span></td>
+                    <td>{{ "%.0f"|format(r.physics_marks) }}/{{ "%.0f"|format(r.physics_max) }}</td>
+                    <td>{{ "%.0f"|format(r.chemistry_marks) }}/{{ "%.0f"|format(r.chemistry_max) }}</td>
+                    <td>{{ "%.0f"|format(r.maths_marks) }}/{{ "%.0f"|format(r.maths_max) }}</td>
+                    <td><strong>{{ "%.0f"|format(r.total_marks) }}</strong>/{{ "%.0f"|format(r.total_max) }}</td>
+                    <td>
+                        {{ "%.1f"|format(r.percentage) }}%
+                        <div class="progress-bar"><div class="progress-fill" style="width:{{ r.percentage }}%"></div></div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p style="padding:20px;color:#666;">No test results available yet.</p>
+        {% endif %}
+    </div>
+</div>
+
+{% if test_results|length > 0 %}
+<script>
+const ctx = document.getElementById('perfChart').getContext('2d');
+const tests = {{ test_results|map(attribute='test_name')|list|tojson }};
+const percents = {{ test_results|map(attribute='percentage')|list|tojson }};
+const totals = {{ test_results|map(attribute='total_marks')|list|tojson }};
+const maxes = {{ test_results|map(attribute='total_max')|list|tojson }};
+
+new Chart(ctx, {
+    type: 'bar',
+    data: {
+        labels: tests.reverse(),
+        datasets: [{
+            label: 'Percentage (%)',
+            data: percents.reverse(),
+            backgroundColor: ['#667eea', '#764ba2', '#f093fb', '#4facfe', '#43e97b', '#fa709a'],
+            borderRadius: 6
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+            legend: { display: false },
+            tooltip: {
+                callbacks: {
+                    label: function(context) {
+                        const idx = context.dataIndex;
+                        return `Score: ${totals.reverse()[idx]}/${maxes.reverse()[idx]} (${percents.reverse()[idx].toFixed(1)}%)`;
+                    }
+                }
+            }
+        },
+        scales: { y: { beginAtZero: true, max: 100 } }
+    }
+});
+</script>
+{% endif %}
+</body>
+</html>
+'''
 
 @app.route('/student/update_progress', methods=['POST'])
 @login_required
@@ -911,18 +976,24 @@ def student_update_progress():
     
     student_id = session['user_id']
     exercise_id = request.form['exercise_id']
-    status = request.form['status']
+    action = request.form['action']
     
     try:
         conn = get_db_connection()
-        if conn:
-            conn.execute('UPDATE progress SET status = ? WHERE student_id = ? AND exercise_id = ?',
-                        (status, student_id, exercise_id))
-            conn.commit()
-            conn.close()
-            flash('Status updated!', 'success')
-        else:
+        if not conn:
             flash('Database error', 'error')
+            return redirect(url_for('student_dashboard'))
+        
+        if action == 'status':
+            conn.execute('UPDATE progress SET status = ? WHERE student_id = ? AND exercise_id = ?',
+                        (request.form['status'], student_id, exercise_id))
+            flash('Status updated!', 'success')
+        elif action == 'discussed':
+            conn.execute('UPDATE progress SET discussed = ? WHERE student_id = ? AND exercise_id = ?',
+                        (request.form['discussed'], student_id, exercise_id))
+            flash('Discussion status updated!', 'success')
+        conn.commit()
+        conn.close()
     except Exception as e:
         flash(f'Error: {e}', 'error')
     
@@ -944,11 +1015,9 @@ def teacher_dashboard():
         if not conn:
             flash('Database error', 'error')
             return redirect(url_for('login'))
-        
         exercises = conn.execute('SELECT id, chapter, exercise_name FROM exercises WHERE subject = ? ORDER BY chapter, id', (subject,)).fetchall()
-        students = conn.execute('SELECT id, name, roll_no, batch, branch FROM students WHERE is_teacher = 0 ORDER BY name').fetchall()
+        students = conn.execute('SELECT id, name, roll_no FROM students WHERE is_teacher = 0 ORDER BY name').fetchall()
         conn.close()
-        
         exercises = [dict(e) for e in exercises]
         students = [dict(s) for s in students]
     except Exception as e:
@@ -959,7 +1028,7 @@ def teacher_dashboard():
     return render_template_string('''
     <!DOCTYPE html>
     <html>
-    <head><title>{{ subject }} - Teacher Dashboard</title>
+    <head><title>{{ subject }} - Teacher</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         *{margin:0;padding:0;box-sizing:border-box;}
@@ -980,7 +1049,6 @@ def teacher_dashboard():
         .section-title{font-size:18px;color:#333;margin-bottom:20px;}
         .add-form{background:#f8f9fa;padding:20px;border-radius:10px;margin-bottom:20px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;}
         .add-form input{padding:10px 15px;border:2px solid #e0e0e0;border-radius:8px;flex:1;min-width:200px;}
-        .add-form input:focus{outline:none;border-color:#667eea;}
         .btn-add{background:#48bb78;color:white;padding:10px 25px;border:none;border-radius:8px;cursor:pointer;font-weight:600;}
         table{width:100%;border-collapse:collapse;font-size:13px;}
         th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #e0e0e0;}
@@ -1100,14 +1168,17 @@ def teacher_update_status():
 @teacher_required
 def sync_data():
     try:
-        sync_all_from_google_sheets()
-        flash('✅ Data synced from Google Sheets!', 'success')
+        count, error = sync_all()
+        if count > 0:
+            flash(f'✅ Synced {count} students from Google Sheets!', 'success')
+        else:
+            flash(f'⚠️ Sync failed: {error}', 'error')
     except Exception as e:
-        flash(f'⚠️ Error syncing: {str(e)}', 'error')
+        flash(f'⚠️ Error: {str(e)}', 'error')
     return redirect(url_for('teacher_dashboard'))
 
 # ====================================================================
-# MESSAGING ROUTES (Same as before)
+# MESSAGING ROUTES
 # ====================================================================
 
 @app.route('/teacher/messages')
@@ -1182,6 +1253,8 @@ def teacher_messages():
                     <div class="message {% if msg.from_id == session.user_id %}sent{% else %}received{% endif %}">
                         <div class="message-header"><span><strong>{{ msg.from_name }}</strong> → {{ msg.to_name }}</span><span>{{ msg.created_at[:16] }}</span></div>
                         <div class="message-body"><strong>{{ msg.subject }}</strong><br>{{ msg.message }}</div>
+                        {% if msg.to_id == session.user_id and msg.is_read == 0 %}
+                        <form method="POST" action="/teacher/mark_read" style="margin-top:5px;"><input type="hidden" name="message_id" value="{{ msg.id }}"><button type="submit" style="padding:3px 10px;background:#667eea;color:white;border:none;border-radius:4px;cursor:pointer;font-size:11px;">✓ Mark Read</button></form>{% endif %}
                     </div>
                     {% endfor %}
                     <div class="message-reply">
@@ -1214,6 +1287,13 @@ def teacher_send_message():
 def teacher_send_reply():
     send_message(session['user_id'], request.form['to_id'], request.form['subject'], request.form['message'])
     flash('Reply sent!', 'success')
+    return redirect(url_for('teacher_messages'))
+
+@app.route('/teacher/mark_read', methods=['POST'])
+@teacher_required
+def teacher_mark_read():
+    mark_message_read(request.form['message_id'])
+    flash('Marked as read', 'success')
     return redirect(url_for('teacher_messages'))
 
 @app.route('/student/messages')
@@ -1296,6 +1376,8 @@ def student_messages():
                     <div class="message {% if msg.from_id == session.user_id %}sent{% else %}received{% endif %}">
                         <div class="message-header"><span><strong>{{ msg.from_name }}</strong> → {{ msg.to_name }}</span><span>{{ msg.created_at[:16] }}</span></div>
                         <div class="message-body"><strong>{{ msg.subject }}</strong><br>{{ msg.message }}</div>
+                        {% if msg.to_id == session.user_id and msg.is_read == 0 %}
+                        <form method="POST" action="/student/mark_read" style="margin-top:5px;"><input type="hidden" name="message_id" value="{{ msg.id }}"><button type="submit" style="padding:3px 10px;background:#667eea;color:white;border:none;border-radius:4px;cursor:pointer;font-size:11px;">✓ Mark Read</button></form>{% endif %}
                     </div>
                     {% endfor %}
                     <div class="message-reply">
@@ -1334,6 +1416,13 @@ def student_send_reply():
     flash('Reply sent!', 'success')
     return redirect(url_for('student_messages'))
 
+@app.route('/student/mark_read', methods=['POST'])
+@login_required
+def student_mark_read():
+    mark_message_read(request.form['message_id'])
+    flash('Marked as read', 'success')
+    return redirect(url_for('student_messages'))
+
 # ====================================================================
 # HEALTH CHECK
 # ====================================================================
@@ -1349,14 +1438,12 @@ def health_check():
         return jsonify({'status': 'error', 'error': str(e)}), 500
 
 # ====================================================================
-# RUN THE APP
+# RUN
 # ====================================================================
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("🎓 Bakliwal Tutorials Portal Running!")
-    print("👤 Students: Select from dropdown, password = Mother's Name")
-    print("👨‍🏫 Teachers: physics_teacher / physics_teacher")
+    print("🎓 Bakliwal Tutorials Portal")
     print("=" * 60)
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
