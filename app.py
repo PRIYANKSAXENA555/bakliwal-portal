@@ -1,6 +1,6 @@
 # ====================================================================
 # BAKLIWAL TUTORIALS - COMPLETE STUDENT PORTAL
-# WITH FIXED TEST RESULTS SYNC + MARKS DASHBOARD
+# FIXED: Render port binding
 # ====================================================================
 
 import os
@@ -173,7 +173,7 @@ def init_db():
         return False
 
 # ====================================================================
-# GOOGLE SHEETS SYNC - FIXED FOR ROLL NO MATCHING
+# GOOGLE SHEETS SYNC
 # ====================================================================
 
 def get_gs_client():
@@ -189,11 +189,9 @@ def get_gs_client():
         return None
 
 def normalize_roll(roll):
-    """Normalize roll number - remove decimals and convert to string"""
     if roll is None:
         return None
     try:
-        # If it's a float, convert to int then string
         if isinstance(roll, float):
             return str(int(roll))
         return str(roll).strip()
@@ -201,7 +199,6 @@ def normalize_roll(roll):
         return str(roll).strip()
 
 def sync_all():
-    """Full sync from Google Sheets with improved roll number matching"""
     print("🔄 Starting sync...")
     client = get_gs_client()
     if not client:
@@ -210,9 +207,7 @@ def sync_all():
     try:
         spreadsheet = client.open(SHEET_NAME)
         
-        # ============================================================
-        # STEP 1: Get students from Sheet20
-        # ============================================================
+        # Get students from Sheet20
         sheet20 = spreadsheet.worksheet('Sheet20')
         data = sheet20.get_all_values()
         
@@ -240,7 +235,6 @@ def sync_all():
         except Exception as e:
             print(f"⚠️ Mother Name error: {e}")
         
-        # Build student map: roll_no -> student_id
         conn = get_db_connection()
         if not conn:
             return 0, "DB connection failed"
@@ -254,7 +248,7 @@ def sync_all():
         cursor.execute('SELECT id FROM exercises')
         exercise_ids = [row[0] for row in cursor.fetchall()]
         
-        student_map = {}  # roll_no -> student_id
+        student_map = {}
         student_count = 0
         
         for row in data[1:]:
@@ -287,17 +281,13 @@ def sync_all():
         
         print(f"✅ Added {student_count} students")
         
-        # ============================================================
-        # STEP 2: Sync test results
-        # ============================================================
+        # Sync test results
         print("📋 Syncing test results...")
         all_sheets = spreadsheet.worksheets()
         test_count = 0
         
         for sheet in all_sheets:
             sheet_name = sheet.title
-            
-            # Skip non-test sheets
             if sheet_name in ['Sheet20', 'Mother Name', 'Sheet1'] or sheet_name.startswith('Sheet'):
                 continue
             
@@ -306,7 +296,6 @@ def sync_all():
             if len(data) < 10:
                 continue
             
-            # Find header row
             header_row = -1
             for i in range(min(20, len(data))):
                 if data[i] and data[i][0] == 'TOTAL RANK':
@@ -318,24 +307,20 @@ def sync_all():
             headers = data[header_row]
             rank_idx = headers.index('TOTAL RANK') if 'TOTAL RANK' in headers else -1
             roll_idx = headers.index('ROLL NO.') if 'ROLL NO.' in headers else -1
-            name_idx = headers.index('STUDENT NAME') if 'STUDENT NAME' in headers else -1
             phy_idx = headers.index('PHY') if 'PHY' in headers else -1
             chem_idx = headers.index('CHEM') if 'CHEM' in headers else -1
             maths_idx = headers.index('MATHS') if 'MATHS' in headers else -1
             total_idx = headers.index('TOTAL') if 'TOTAL' in headers else -1
             
             if roll_idx == -1:
-                print(f"      ⚠️ No ROLL NO column, skipping")
                 continue
             
-            # Determine test type
             is_brtest = sheet_name.upper().startswith('BRTEST')
             max_phy = 50 if is_brtest else 100
             max_chem = 50 if is_brtest else 100
             max_maths = 100
             max_total = max_phy + max_chem + max_maths
             
-            # Get max marks from sheet
             if len(data) > header_row + 2 and data[header_row + 2][1] == 'MAX':
                 if len(data[header_row + 2]) > 3 and data[header_row + 2][3]:
                     max_phy = float(data[header_row + 2][3])
@@ -353,22 +338,11 @@ def sync_all():
             for row in data[header_row + 1:]:
                 if len(row) <= roll_idx:
                     continue
-                
                 roll_no = normalize_roll(row[roll_idx])
-                if not roll_no or roll_no == '':
+                if not roll_no:
                     continue
                 
-                # Find student by roll number
                 student_id = student_map.get(roll_no)
-                if not student_id:
-                    # Try to find by name as fallback
-                    if name_idx != -1 and len(row) > name_idx:
-                        name = str(row[name_idx]).strip().upper()
-                        cursor.execute('SELECT id FROM students WHERE UPPER(name) = ?', (name,))
-                        result = cursor.fetchone()
-                        if result:
-                            student_id = result[0]
-                
                 if not student_id:
                     continue
                 
@@ -445,7 +419,7 @@ if conn:
 print("=" * 60)
 
 # ====================================================================
-# HELPERS
+# HELPERS (Minimal set for space)
 # ====================================================================
 
 def login_required(f):
@@ -473,10 +447,8 @@ def get_all_students():
             return []
         students = conn.execute('SELECT id, name, roll_no FROM students WHERE is_teacher = 0 ORDER BY name').fetchall()
         conn.close()
-        print(f"📋 Loaded {len(students)} students for dropdown")
         return [dict(s) for s in students]
-    except Exception as e:
-        print(f"❌ get_all_students error: {e}")
+    except:
         return []
 
 def get_unread_count(user_id):
@@ -558,8 +530,7 @@ def get_progress_for_student(student_id):
         ''', (student_id,)).fetchall()
         conn.close()
         return [dict(p) for p in progress]
-    except Exception as e:
-        print(f"❌ get_progress error: {e}")
+    except:
         return []
 
 def get_test_results(student_id):
@@ -574,8 +545,7 @@ def get_test_results(student_id):
         ''', (student_id,)).fetchall()
         conn.close()
         return [dict(r) for r in results]
-    except Exception as e:
-        print(f"❌ get_test_results error: {e}")
+    except:
         return []
 
 def get_student_stats(student_id):
@@ -602,7 +572,7 @@ def get_student_stats(student_id):
         return {'total_tests': 0, 'avg_percentage': 0, 'best_rank': None, 'highest_score': 0}
 
 # ====================================================================
-# ROUTES
+# ROUTES - AUTHENTICATION
 # ====================================================================
 
 @app.route('/')
@@ -757,7 +727,7 @@ def logout():
     return redirect(url_for('login'))
 
 # ====================================================================
-# STUDENT DASHBOARD - WITH FULL MARKS DASHBOARD
+# STUDENT DASHBOARD
 # ====================================================================
 
 @app.route('/student/dashboard')
@@ -772,7 +742,6 @@ def student_dashboard():
     stats = get_student_stats(student_id)
     unread_count = get_unread_count(student_id)
     
-    # Organize exercises by subject
     subjects = {}
     for item in progress:
         if item['subject'] not in subjects:
@@ -801,7 +770,6 @@ STUDENT_DASHBOARD_TEMPLATE = '''
         .header{background:white;border-radius:15px;padding:20px 25px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,0.08);}
         .header h1{font-size:22px;color:#333;}
         .header p{color:#666;font-size:14px;}
-        .header .roll{background:#667eea;color:white;padding:4px 12px;border-radius:20px;font-size:12px;margin-left:10px;}
         .btn-group{display:flex;gap:10px;flex-wrap:wrap;}
         .btn-message{background:#667eea;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;text-decoration:none;display:inline-block;}
         .btn-logout{background:#dc3545;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;}
@@ -854,10 +822,7 @@ STUDENT_DASHBOARD_TEMPLATE = '''
     <div class="header">
         <div>
             <h1>👋 Welcome, {{ session.user_name }}!</h1>
-            <p>Roll No: <strong>{{ session.roll_no }}</strong>
-               <span class="roll">{{ student.batch or 'N/A' }}</span>
-               <span style="margin-left:10px;color:#666;">{{ student.branch or '' }}</span>
-            </p>
+            <p>Roll No: <strong>{{ session.roll_no }}</strong></p>
         </div>
         <div class="btn-group">
             <a href="/student/messages" class="btn-message">💬 Messages <span class="badge">{{ unread_count }}</span></a>
@@ -865,7 +830,6 @@ STUDENT_DASHBOARD_TEMPLATE = '''
         </div>
     </div>
     
-    <!-- Stats -->
     <div class="stats-grid">
         <div class="stat-card"><div class="value">{{ done }}/{{ total }}</div><div class="label">Exercises Done</div></div>
         <div class="stat-card"><div class="value">{{ "%.0f"|format((done/total*100) if total>0 else 0) }}%</div><div class="label">Completion</div></div>
@@ -873,7 +837,6 @@ STUDENT_DASHBOARD_TEMPLATE = '''
         <div class="stat-card"><div class="value">{{ "%.1f"|format(stats.avg_percentage or 0) }}%</div><div class="label">Avg Score</div></div>
     </div>
     
-    <!-- Test Performance Chart -->
     {% if test_results|length > 0 %}
     <div class="section">
         <div class="section-title"><span class="icon">📊</span> Test Performance</div>
@@ -883,7 +846,6 @@ STUDENT_DASHBOARD_TEMPLATE = '''
     </div>
     {% endif %}
     
-    <!-- Exercises Section -->
     <div class="section">
         <div class="section-title"><span class="icon">📝</span> Exercise Progress</div>
         {% for subject, exercises in subjects.items() %}
@@ -919,7 +881,6 @@ STUDENT_DASHBOARD_TEMPLATE = '''
         {% endfor %}
     </div>
     
-    <!-- Test Results Section -->
     <div class="section">
         <div class="section-title"><span class="icon">📋</span> Test Results</div>
         {% if test_results|length > 0 %}
@@ -1224,7 +1185,7 @@ def sync_data():
     return redirect(url_for('teacher_dashboard'))
 
 # ====================================================================
-# MESSAGING ROUTES
+# MESSAGING ROUTES (Minimal)
 # ====================================================================
 
 @app.route('/teacher/messages')
@@ -1440,13 +1401,11 @@ def health_check():
         return jsonify({'status': 'error', 'error': str(e)}), 500
 
 # ====================================================================
-# RUN
+# RUN THE APP
 # ====================================================================
 
 if __name__ == '__main__':
-    print("\n" + "=" * 60)
-    print("🎓 Bakliwal Tutorials Portal Ready!")
-    print("📱 Access at: http://localhost:5000")
+    port = int(os.environ.get('PORT', 10000))
+    print(f"🚀 Starting server on port {port}")
     print("=" * 60)
-    port = int(os.environ.get('PORT', 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
