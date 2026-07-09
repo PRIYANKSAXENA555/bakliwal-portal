@@ -1,12 +1,11 @@
 # ====================================================================
 # BAKLIWAL TUTORIALS - COMPLETE STUDENT PORTAL
-# FIXED: Login error + Google Sheets sync
+# WITH DEBUG AND PASSWORD RESET ROUTES
 # ====================================================================
 
 import os
 import json
 import sqlite3
-import tempfile
 from datetime import datetime
 from flask import Flask, render_template_string, request, redirect, url_for, session, flash, jsonify
 from functools import wraps
@@ -15,26 +14,25 @@ from werkzeug.security import generate_password_hash, check_password_hash
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-this')
 
-DB_PATH = os.path.join(tempfile.gettempdir(), 'students.db')
+# Database path
+DB_PATH = 'students.db'
+
 SHEET_NAME = os.environ.get('SHEET_NAME', 'Master Sheet')
 GOOGLE_CREDENTIALS_JSON = os.environ.get('GOOGLE_CREDENTIALS_JSON')
 
-print("=" * 70)
+print("=" * 60)
 print("🚀 BAKLIWAL TUTORIALS PORTAL")
-print("=" * 70)
 print(f"📊 Database: {DB_PATH}")
-print(f"📝 Sheet Name: {SHEET_NAME}")
-print(f"🔑 Credentials: {'✅ Set' if GOOGLE_CREDENTIALS_JSON else '❌ NOT SET'}")
-print("=" * 70)
+print(f"📝 Sheet: {SHEET_NAME}")
+print("=" * 60)
 
+# Try Google Sheets
 try:
     import gspread
     from oauth2client.service_account import ServiceAccountCredentials
     HAS_GSHEETS = True
-    print("✅ Google Sheets module loaded")
-except ImportError as e:
+except ImportError:
     HAS_GSHEETS = False
-    print(f"❌ Google Sheets module not loaded: {e}")
 
 # ====================================================================
 # DATABASE
@@ -190,29 +188,20 @@ def get_gs_client():
         return None
 
 def sync_all():
-    print("=" * 70)
-    print("🔄 STARTING FULL SYNC...")
-    print("=" * 70)
-    
+    print("🔄 Starting sync...")
     client = get_gs_client()
     if not client:
-        print("❌ No Google Sheets client")
-        return 0, "Google Sheets client not available"
+        return 0, "No Google Sheets client"
     
     try:
-        print(f"📂 Opening spreadsheet: {SHEET_NAME}")
         spreadsheet = client.open(SHEET_NAME)
-        print(f"✅ Spreadsheet opened: {spreadsheet.title}")
+        sheet20 = spreadsheet.worksheet('Sheet20')
+        data = sheet20.get_all_values()
         
-        all_sheets = spreadsheet.worksheets()
-        sheet_names = [s.title for s in all_sheets]
-        print(f"📋 Available sheets: {', '.join(sheet_names)}")
-        
-        if 'Sheet20' not in sheet_names:
-            return 0, "Sheet20 not found in spreadsheet"
+        if len(data) < 2:
+            return 0, "Sheet20 is empty"
         
         # Get mother names
-        print("\n📋 Reading Mother Name sheet...")
         mother_dict = {}
         try:
             mother_sheet = spreadsheet.worksheet('Mother Name')
@@ -220,18 +209,8 @@ def sync_all():
             for row in mother_data[1:]:
                 if len(row) >= 2 and row[0].strip():
                     mother_dict[row[0].strip().upper()] = row[1].strip()
-            print(f"   ✅ Loaded {len(mother_dict)} mother names")
-        except Exception as e:
-            print(f"   ⚠️ Error reading Mother Name: {e}")
-
-        # Get students from Sheet20
-        print("\n📋 Reading Sheet20...")
-        sheet20 = spreadsheet.worksheet('Sheet20')
-        data = sheet20.get_all_values()
-        print(f"   Found {len(data)} rows in Sheet20")
-        
-        if len(data) < 2:
-            return 0, "Sheet20 is empty"
+        except:
+            pass
         
         headers = data[0]
         name_idx = headers.index('NAME') if 'NAME' in headers else -1
@@ -240,14 +219,13 @@ def sync_all():
         branch_idx = headers.index('BRANCH') if 'BRANCH' in headers else -1
         
         if roll_idx == -1 or name_idx == -1:
-            return 0, "NAME or ROLL NO column not found"
+            return 0, "NAME or ROLL NO not found"
         
         conn = get_db_connection()
         if not conn:
-            return 0, "Database connection failed"
+            return 0, "DB connection failed"
         cursor = conn.cursor()
         
-        # Clear non-teacher students
         cursor.execute('DELETE FROM students WHERE is_teacher = 0')
         cursor.execute('DELETE FROM progress')
         
@@ -275,197 +253,27 @@ def sync_all():
             
             student_id = cursor.lastrowid
             student_count += 1
-            
             for ex_id in exercise_ids:
                 cursor.execute('''
                     INSERT OR IGNORE INTO progress (student_id, exercise_id, status, discussed)
                     VALUES (?, ?, 'pending', 'no')
                 ''', (student_id, ex_id))
         
-        print(f"   ✅ Added {student_count} students")
-
-        # Sync test results
-        print("\n📋 Syncing test results...")
-        test_count = 0
-        for sheet in all_sheets:
-            sheet_name = sheet.title
-            if sheet_name in ['Sheet20', 'Mother Name', 'Sheet1'] or sheet_name.startswith('Sheet'):
-                continue
-            
-            print(f"   📄 Processing: {sheet_name}")
-            data = sheet.get_all_values()
-            if len(data) < 10:
-                continue
-            
-            header_row = -1
-            for i in range(min(20, len(data))):
-                if data[i] and data[i][0] == 'TOTAL RANK':
-                    header_row = i
-                    break
-            if header_row == -1:
-                continue
-            
-            headers = data[header_row]
-            roll_idx = headers.index('ROLL NO.') if 'ROLL NO.' in headers else -1
-            rank_idx = headers.index('TOTAL RANK') if 'TOTAL RANK' in headers else -1
-            phy_idx = headers.index('PHY') if 'PHY' in headers else -1
-            chem_idx = headers.index('CHEM') if 'CHEM' in headers else -1
-            maths_idx = headers.index('MATHS') if 'MATHS' in headers else -1
-            total_idx = headers.index('TOTAL') if 'TOTAL' in headers else -1
-            
-            if roll_idx == -1:
-                continue
-            
-            is_brtest = sheet_name.upper().startswith('BRTEST')
-            max_phy = 50 if is_brtest else 100
-            max_chem = 50 if is_brtest else 100
-            max_maths = 100
-            max_total = max_phy + max_chem + max_maths
-            
-            test_name = sheet_name.replace('BATCH ', '').replace('BTEST', 'Test')
-            test_name = test_name.replace('GRAND TEST', 'Grand Test').replace('BRTEST', 'CET Test')
-            
-            for row in data[header_row + 1:]:
-                if len(row) <= roll_idx:
-                    continue
-                roll_no = str(row[roll_idx]).strip()
-                if not roll_no:
-                    continue
-                
-                cursor.execute('SELECT id FROM students WHERE roll_no = ?', (roll_no,))
-                student = cursor.fetchone()
-                if not student:
-                    continue
-                
-                try:
-                    phy = float(row[phy_idx]) if phy_idx != -1 and row[phy_idx] else 0
-                except:
-                    phy = 0
-                try:
-                    chem = float(row[chem_idx]) if chem_idx != -1 and row[chem_idx] else 0
-                except:
-                    chem = 0
-                try:
-                    maths = float(row[maths_idx]) if maths_idx != -1 and row[maths_idx] else 0
-                except:
-                    maths = 0
-                try:
-                    total = float(row[total_idx]) if total_idx != -1 and row[total_idx] else 0
-                except:
-                    total = phy + chem + maths
-                
-                rank = str(row[rank_idx]) if rank_idx != -1 and row[rank_idx] else '-'
-                percentage = (total / max_total * 100) if max_total > 0 else 0
-                
-                cursor.execute('''
-                    INSERT OR REPLACE INTO test_results 
-                    (student_id, test_name, test_type, rank, 
-                     physics_marks, physics_max, chemistry_marks, chemistry_max, 
-                     maths_marks, maths_max, total_marks, total_max, percentage, test_date)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ''', (student[0], test_name, 'CET' if is_brtest else 'Mains',
-                      rank, phy, max_phy, chem, max_chem, maths, max_maths,
-                      total, max_total, percentage))
-                test_count += 1
-        
         conn.commit()
         conn.close()
-        
-        print("\n" + "=" * 70)
-        print(f"✅ SYNC COMPLETE!")
-        print(f"   Students: {student_count}")
-        print(f"   Test Results: {test_count}")
-        print("=" * 70)
         return student_count, None
         
-    except gspread.exceptions.SpreadsheetNotFound:
-        print(f"❌ Spreadsheet '{SHEET_NAME}' not found!")
-        return 0, f"Spreadsheet '{SHEET_NAME}' not found"
     except Exception as e:
         print(f"❌ Sync error: {e}")
-        import traceback
-        traceback.print_exc()
-        return 0, f"Sync error: {str(e)}"
+        return 0, str(e)
 
 # ====================================================================
-# SEED DEMO DATA
+# INITIALIZE ON STARTUP
 # ====================================================================
 
-def seed_demo_data():
-    conn = get_db_connection()
-    if not conn:
-        return
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT COUNT(*) as count FROM students WHERE is_teacher = 0')
-    if cursor.fetchone()[0] > 0:
-        conn.close()
-        return
-    
-    print("📝 Seeding demo data...")
-    demo_students = [
-        ('KETKI KULKARNI', '23000010', 'Varsha', 'WOW', 'JS'),
-        ('KARTIK KULKARNI', '23000009', 'Smita', 'WOW', 'JS'),
-        ('JAYRAJ HUGAR', '23000008', 'Jayashri', 'WOW', 'JS'),
-        ('OJAS HUMNABADKAR', '25800325', 'Pratibha', 'WOW', 'JS'),
-        ('SATVIKA MORE', '23000017', 'Manisha', 'WOW', 'JS'),
-        ('ANIMESH CHAVAN', '23000004', 'Varsha', 'WOW', 'JS'),
-        ('PIYUSH PAWAR', '25800415', 'Archana', 'WOW', 'JS'),
-        ('ARNAV THITE', '26850027', 'Shriya', 'WOW', 'JS'),
-        ('SAYALI MADALE', '23000024', 'Savita', 'WOW', 'JS'),
-        ('SHRAVNI GIRAM', '27337339', 'Jyoti', 'WOW', 'JS'),
-    ]
-    
-    cursor.execute('SELECT id FROM exercises')
-    exercise_ids = [row[0] for row in cursor.fetchall()]
-    
-    for name, roll, mother, batch, branch in demo_students:
-        password_hash = generate_password_hash(mother.lower())
-        cursor.execute('''
-            INSERT INTO students (name, roll_no, mother_name, batch, branch, password_hash, is_teacher)
-            VALUES (?, ?, ?, ?, ?, ?, 0)
-        ''', (name, roll, mother, batch, branch, password_hash))
-        student_id = cursor.lastrowid
-        for ex_id in exercise_ids:
-            cursor.execute('''
-                INSERT OR IGNORE INTO progress (student_id, exercise_id, status, discussed)
-                VALUES (?, ?, 'pending', 'no')
-            ''', (student_id, ex_id))
-    
-    conn.commit()
-    conn.close()
-    print(f"✅ Seeded {len(demo_students)} demo students")
-
-# ====================================================================
-# INITIALIZE
-# ====================================================================
-
-print("\n" + "=" * 70)
+print("🔧 Initializing...")
 init_db()
-print("=" * 70)
-
-print("\n📡 ATTEMPTING GOOGLE SHEETS SYNC...")
-count, error = sync_all()
-
-if count > 0:
-    print(f"✅ Successfully synced {count} students from Google Sheets!")
-else:
-    print(f"⚠️ Sync failed: {error}")
-    print("📝 Seeding demo data instead...")
-    seed_demo_data()
-
-conn = get_db_connection()
-if conn:
-    cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(*) as count FROM students WHERE is_teacher = 0')
-    student_count = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) as count FROM test_results')
-    test_count = cursor.fetchone()[0]
-    conn.close()
-    print(f"\n📊 DATABASE STATUS:")
-    print(f"   Students: {student_count}")
-    print(f"   Test Results: {test_count}")
-print("=" * 70)
+print("✅ Ready!")
 
 # ====================================================================
 # HELPERS
@@ -520,8 +328,8 @@ def send_message(from_id, to_id, subject, message, parent_id=None):
                     (from_id, to_id, subject, message, parent_id))
         conn.commit()
         conn.close()
-    except Exception as e:
-        print(f"⚠️ Send message error: {e}")
+    except:
+        pass
 
 def mark_message_read(message_id):
     try:
@@ -557,7 +365,7 @@ def get_students():
         conn = get_db_connection()
         if not conn:
             return []
-        students = conn.execute('SELECT id, name, roll_no, batch, branch FROM students WHERE is_teacher = 0 ORDER BY name').fetchall()
+        students = conn.execute('SELECT id, name, roll_no FROM students WHERE is_teacher = 0 ORDER BY name').fetchall()
         conn.close()
         return [dict(s) for s in students]
     except:
@@ -588,10 +396,10 @@ def get_test_results(student_id):
         if not conn:
             return []
         results = conn.execute('''
-                SELECT * FROM test_results
-                WHERE student_id = ?
-                ORDER BY test_date DESC
-            ''', (student_id,)).fetchall()
+            SELECT * FROM test_results
+            WHERE student_id = ?
+            ORDER BY test_date DESC
+        ''', (student_id,)).fetchall()
         conn.close()
         return [dict(r) for r in results]
     except:
@@ -628,6 +436,10 @@ def get_student_stats(student_id):
 def index():
     return redirect(url_for('login'))
 
+# ====================================================================
+# LOGIN ROUTE
+# ====================================================================
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     students = get_all_students()
@@ -649,13 +461,12 @@ def login():
                 user = conn.execute('SELECT * FROM students WHERE name = ? OR roll_no = ? OR email = ?', 
                                    (username, username, username)).fetchone()
             else:
-                flash('Please select a student or enter your name', 'error')
+                flash('Please select a student', 'error')
                 return render_template_string(LOGIN_TEMPLATE, students=students)
             
             conn.close()
             
             if user:
-                # Convert Row to dict for easier access
                 user_dict = dict(user)
                 if check_password_hash(user_dict['password_hash'], password.lower()):
                     session['user_id'] = user_dict['id']
@@ -673,10 +484,9 @@ def login():
                     flash('Invalid password. Use your Mother\'s Name.', 'error')
             else:
                 flash('User not found.', 'error')
+                
         except Exception as e:
             print(f"❌ Login error: {e}")
-            import traceback
-            traceback.print_exc()
             flash('Login error. Please try again.', 'error')
     
     return render_template_string(LOGIN_TEMPLATE, students=students)
@@ -738,7 +548,7 @@ LOGIN_TEMPLATE = '''
         </div>
         <div class="form-group">
             <label>🔑 Password (Mother's Name)</label>
-            <input type="password" name="password" placeholder="Enter mother's name (any case)" required>
+            <input type="password" name="password" placeholder="Enter mother's name" required>
         </div>
         <button type="submit">🔓 Login</button>
     </form>
@@ -752,7 +562,7 @@ LOGIN_TEMPLATE = '''
         <form method="POST">
             <div class="form-group">
                 <label>📝 Username</label>
-                <input type="text" name="username" placeholder="physics_teacher / chemistry_teacher / maths_teacher">
+                <input type="text" name="username" placeholder="physics_teacher">
             </div>
             <div class="form-group">
                 <label>🔑 Password</label>
@@ -778,249 +588,131 @@ def logout():
     return redirect(url_for('login'))
 
 # ====================================================================
-# STUDENT DASHBOARD
+# DEBUG ROUTES - TO FIX LOGIN ISSUES
 # ====================================================================
 
-@app.route('/student/dashboard')
-@login_required
-def student_dashboard():
-    if session.get('is_teacher'):
-        return redirect(url_for('teacher_dashboard'))
-    
-    student_id = session['user_id']
-    progress = get_progress_for_student(student_id)
-    test_results = get_test_results(student_id)
-    stats = get_student_stats(student_id)
-    unread_count = get_unread_count(student_id)
-    
-    subjects = {}
-    for item in progress:
-        if item['subject'] not in subjects:
-            subjects[item['subject']] = []
-        subjects[item['subject']].append(item)
-    
-    total = len(progress)
-    done = sum(1 for p in progress if p['status'] == 'done')
-    discussed = sum(1 for p in progress if p['discussed'] == 'yes')
-    
-    return render_template_string(STUDENT_DASHBOARD_TEMPLATE, 
-        subjects=subjects, total=total, done=done, discussed=discussed,
-        test_results=test_results, stats=stats, unread_count=unread_count)
-
-STUDENT_DASHBOARD_TEMPLATE = '''
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Student Dashboard</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        *{margin:0;padding:0;box-sizing:border-box;}
-        body{font-family:Segoe UI,sans-serif;background:#f5f5f5;padding:20px;}
-        .container{max-width:1200px;margin:0 auto;}
-        .header{background:white;border-radius:15px;padding:20px 25px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,0.08);}
-        .header h1{font-size:22px;color:#333;}
-        .btn-group{display:flex;gap:10px;flex-wrap:wrap;}
-        .btn-message{background:#667eea;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;text-decoration:none;display:inline-block;}
-        .btn-logout{background:#dc3545;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;}
-        .badge{background:#e53e3e;color:white;padding:2px 8px;border-radius:10px;font-size:12px;margin-left:5px;}
-        .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:20px;margin-bottom:30px;}
-        .stat-card{background:white;border-radius:15px;padding:20px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,0.08);}
-        .stat-card .value{font-size:28px;font-weight:bold;color:#667eea;}
-        .stat-card .label{color:#666;font-size:13px;margin-top:5px;}
-        .section{background:white;border-radius:15px;padding:25px;margin-bottom:25px;box-shadow:0 2px 10px rgba(0,0,0,0.08);overflow-x:auto;}
-        .section-title{font-size:18px;color:#333;margin-bottom:20px;}
-        .subject-title{padding:12px 15px;font-weight:bold;color:white;border-radius:8px;margin-bottom:10px;}
-        .subject-physics{background:#4299e1;}
-        .subject-chemistry{background:#ed8936;}
-        .subject-mathematics{background:#9f7aea;}
-        table{width:100%;border-collapse:collapse;font-size:13px;}
-        th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #e0e0e0;}
-        th{background:#f8f9fa;font-weight:600;}
-        .status-done{background:#48bb78;color:white;padding:3px 8px;border-radius:4px;font-size:11px;}
-        .status-pending{background:#f56565;color:white;padding:3px 8px;border-radius:4px;font-size:11px;}
-        .discussed-yes{background:#48bb78;color:white;padding:3px 8px;border-radius:4px;font-size:11px;}
-        .discussed-no{background:#f56565;color:white;padding:3px 8px;border-radius:4px;font-size:11px;}
-        .btn-sm{padding:4px 8px;border:none;border-radius:4px;cursor:pointer;font-size:11px;margin:1px;}
-        .btn-done{background:#48bb78;color:white;}
-        .btn-pending{background:#f56565;color:white;}
-        .btn-discuss-yes{background:#48bb78;color:white;}
-        .btn-discuss-no{background:#f56565;color:white;}
-        .rank-badge{padding:2px 10px;border-radius:20px;font-weight:600;font-size:12px;}
-        .rank-good{background:#d4edda;color:#155724;}
-        .rank-avg{background:#fff3cd;color:#856404;}
-        .rank-low{background:#f8d7da;color:#721c24;}
-        .chart-container{height:280px;margin-top:10px;}
-        .progress-bar{background:#e0e0e0;border-radius:10px;overflow:hidden;height:6px;width:100px;}
-        .progress-fill{background:linear-gradient(90deg,#667eea,#764ba2);height:100%;border-radius:10px;}
-        @media (max-width:768px){.header{flex-direction:column;align-items:flex-start;gap:15px;}}
-    </style>
-</head>
-<body>
-<div class="container">
-    <div class="header">
-        <div><h1>👋 Welcome, {{ session.user_name }}!</h1><p>Roll No: <strong>{{ session.roll_no }}</strong></p></div>
-        <div class="btn-group">
-            <a href="/student/messages" class="btn-message">💬 Messages <span class="badge">{{ unread_count }}</span></a>
-            <button class="btn-logout" onclick="location.href='/logout'">🚪 Logout</button>
-        </div>
-    </div>
-    
-    <div class="stats-grid">
-        <div class="stat-card"><div class="value">{{ done }}/{{ total }}</div><div class="label">Exercises Done</div></div>
-        <div class="stat-card"><div class="value">{{ "%.0f"|format((done/total*100) if total>0 else 0) }}%</div><div class="label">Completion</div></div>
-        <div class="stat-card"><div class="value">{{ stats.total_tests or 0 }}</div><div class="label">Tests Given</div></div>
-        <div class="stat-card"><div class="value">{{ "%.1f"|format(stats.avg_percentage or 0) }}%</div><div class="label">Avg Score</div></div>
-    </div>
-    
-    {% if test_results|length > 0 %}
-    <div class="section">
-        <div class="section-title">📊 Performance Trend</div>
-        <div class="chart-container"><canvas id="perfChart"></canvas></div>
-    </div>
-    {% endif %}
-    
-    <div class="section">
-        <div class="section-title">📝 Exercise Progress</div>
-        {% for subject, exercises in subjects.items() %}
-        <div class="subject-title subject-{{ subject.lower() }}">{{ subject }}</div>
-        <table>
-            <thead><tr><th>Chapter</th><th>Exercise</th><th>Status</th><th>Discussed</th><th>Teacher Comment</th><th>Actions</th></tr></thead>
-            <tbody>
-                {% for ex in exercises %}
-                <tr>
-                    <td>{{ ex.chapter }}</td>
-                    <td>{{ ex.exercise_name }}</td>
-                    <td><span class="status-{{ ex.status }}">{{ ex.status.upper() }}</span></td>
-                    <td><span class="discussed-{{ ex.discussed }}">{{ ex.discussed.upper() }}</span></td>
-                    <td>{{ ex.teacher_comment or 'No comment' }}</td>
-                    <td>
-                        <form method="POST" action="/student/update_progress" style="display:inline;">
-                            <input type="hidden" name="exercise_id" value="{{ ex.exercise_id }}">
-                            <input type="hidden" name="action" value="status">
-                            <button type="submit" name="status" value="done" class="btn-sm btn-done">✓ Done</button>
-                            <button type="submit" name="status" value="pending" class="btn-sm btn-pending">○ Pending</button>
-                        </form>
-                        <form method="POST" action="/student/update_progress" style="display:inline;">
-                            <input type="hidden" name="exercise_id" value="{{ ex.exercise_id }}">
-                            <input type="hidden" name="action" value="discussed">
-                            <button type="submit" name="discussed" value="yes" class="btn-sm btn-discuss-yes">📚 Yes</button>
-                            <button type="submit" name="discussed" value="no" class="btn-sm btn-discuss-no">📚 No</button>
-                        </form>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% endfor %}
-    </div>
-    
-    <div class="section">
-        <div class="section-title">📋 Test Results</div>
-        {% if test_results|length > 0 %}
-        <table>
-            <thead><tr><th>Test</th><th>Type</th><th>Rank</th><th>Physics</th><th>Chemistry</th><th>Maths</th><th>Total</th><th>%</th></tr></thead>
-            <tbody>
-                {% for r in test_results %}
-                {% set rank_num = r.rank|int if r.rank != '-' and r.rank else 999 %}
-                {% set rank_class = 'rank-good' if rank_num <= 50 else ('rank-avg' if rank_num <= 100 else 'rank-low') %}
-                <tr>
-                    <td><strong>{{ r.test_name }}</strong></td>
-                    <td><span style="display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;background:#667eea;color:white;">{{ r.test_type or 'Mains' }}</span></td>
-                    <td><span class="rank-badge {{ rank_class }}">#{{ r.rank if r.rank != '-' else '-' }}</span></td>
-                    <td>{{ "%.0f"|format(r.physics_marks) }}/{{ "%.0f"|format(r.physics_max) }}</td>
-                    <td>{{ "%.0f"|format(r.chemistry_marks) }}/{{ "%.0f"|format(r.chemistry_max) }}</td>
-                    <td>{{ "%.0f"|format(r.maths_marks) }}/{{ "%.0f"|format(r.maths_max) }}</td>
-                    <td><strong>{{ "%.0f"|format(r.total_marks) }}</strong>/{{ "%.0f"|format(r.total_max) }}</td>
-                    <td>
-                        {{ "%.1f"|format(r.percentage) }}%
-                        <div class="progress-bar"><div class="progress-fill" style="width:{{ r.percentage }}%"></div></div>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% else %}
-        <p style="padding:20px;color:#666;">No test results available yet.</p>
-        {% endif %}
-    </div>
-</div>
-
-{% if test_results|length > 0 %}
-<script>
-const ctx = document.getElementById('perfChart').getContext('2d');
-const tests = {{ test_results|map(attribute='test_name')|list|tojson }};
-const percents = {{ test_results|map(attribute='percentage')|list|tojson }};
-const totals = {{ test_results|map(attribute='total_marks')|list|tojson }};
-const maxes = {{ test_results|map(attribute='total_max')|list|tojson }};
-
-new Chart(ctx, {
-    type: 'bar',
-    data: {
-        labels: tests.reverse(),
-        datasets: [{
-            label: 'Percentage (%)',
-            data: percents.reverse(),
-            backgroundColor: ['#667eea', '#764ba2', '#f093fb', '#4facfe', '#43e97b', '#fa709a'],
-            borderRadius: 6
-        }]
-    },
-    options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-            legend: { display: false },
-            tooltip: {
-                callbacks: {
-                    label: function(context) {
-                        const idx = context.dataIndex;
-                        return `Score: ${totals.reverse()[idx]}/${maxes.reverse()[idx]} (${percents.reverse()[idx].toFixed(1)}%)`;
-                    }
-                }
-            }
-        },
-        scales: { y: { beginAtZero: true, max: 100 } }
-    }
-});
-</script>
-{% endif %}
-</body>
-</html>
-'''
-
-@app.route('/student/update_progress', methods=['POST'])
-@login_required
-def student_update_progress():
-    if session.get('is_teacher'):
-        return redirect(url_for('teacher_dashboard'))
-    
-    student_id = session['user_id']
-    exercise_id = request.form['exercise_id']
-    action = request.form['action']
-    
+@app.route('/debug/check_student/<int:student_id>')
+def debug_check_student(student_id):
+    """Check what mother name is stored for a student"""
     try:
         conn = get_db_connection()
-        if not conn:
-            flash('Database error', 'error')
-            return redirect(url_for('student_dashboard'))
-        
-        if action == 'status':
-            conn.execute('UPDATE progress SET status = ? WHERE student_id = ? AND exercise_id = ?',
-                        (request.form['status'], student_id, exercise_id))
-            flash('Status updated!', 'success')
-        elif action == 'discussed':
-            conn.execute('UPDATE progress SET discussed = ? WHERE student_id = ? AND exercise_id = ?',
-                        (request.form['discussed'], student_id, exercise_id))
-            flash('Discussion status updated!', 'success')
-        conn.commit()
+        student = conn.execute('SELECT id, name, roll_no, mother_name FROM students WHERE id = ?', (student_id,)).fetchone()
         conn.close()
+        
+        if student:
+            return f"""
+            <html>
+            <head><title>Student Debug</title></head>
+            <body style="font-family:Segoe UI,sans-serif;padding:30px;">
+                <h2>🔍 Student Debug Info</h2>
+                <hr>
+                <p><strong>ID:</strong> {student['id']}</p>
+                <p><strong>Name:</strong> {student['name']}</p>
+                <p><strong>Roll No:</strong> {student['roll_no']}</p>
+                <p><strong>Mother Name (stored):</strong> <code>'{student['mother_name']}'</code></p>
+                <p><strong>Try logging in with:</strong> {student['mother_name']} (case insensitive)</p>
+                <hr>
+                <p><a href="/login">🔙 Go back to Login</a></p>
+                <p><a href="/admin/reset_all_passwords">🔄 Reset ALL Student Passwords</a></p>
+            </body>
+            </html>
+            """
+        else:
+            return "Student not found"
     except Exception as e:
-        flash(f'Error: {e}', 'error')
-    
-    return redirect(url_for('student_dashboard'))
+        return f"Error: {e}"
+
+@app.route('/debug/list_students')
+def debug_list_students():
+    """List all students with their mother names"""
+    try:
+        conn = get_db_connection()
+        students = conn.execute('SELECT id, name, roll_no, mother_name FROM students WHERE is_teacher = 0 ORDER BY name LIMIT 20').fetchall()
+        conn.close()
+        
+        html = """
+        <html>
+        <head><title>Students List</title></head>
+        <body style="font-family:Segoe UI,sans-serif;padding:30px;">
+            <h2>📋 Students List (First 20)</h2>
+            <hr>
+            <table border="1" cellpadding="8" style="border-collapse:collapse;">
+                <tr><th>ID</th><th>Name</th><th>Roll No</th><th>Mother Name</th></tr>
+        """
+        for s in students:
+            html += f"<tr><td>{s['id']}</td><td>{s['name']}</td><td>{s['roll_no']}</td><td><code>{s['mother_name']}</code></td></tr>"
+        
+        html += """
+            </table>
+            <hr>
+            <p><a href="/login">🔙 Go back to Login</a></p>
+            <p><a href="/admin/reset_all_passwords">🔄 Reset ALL Student Passwords</a></p>
+        </body>
+        </html>
+        """
+        return html
+    except Exception as e:
+        return f"Error: {e}"
 
 # ====================================================================
-# TEACHER DASHBOARD
+# RESET PASSWORDS ROUTE
+# ====================================================================
+
+@app.route('/admin/reset_all_passwords')
+def reset_all_passwords():
+    """Reset ALL student passwords to their mother's name"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Get all students
+        cursor.execute('SELECT id, mother_name FROM students WHERE is_teacher = 0')
+        students = cursor.fetchall()
+        
+        count = 0
+        errors = []
+        for s in students:
+            try:
+                # Clean mother name - remove extra spaces, convert to lowercase for hashing
+                clean_mother = s['mother_name'].strip().lower()
+                password_hash = generate_password_hash(clean_mother)
+                cursor.execute('UPDATE students SET password_hash = ? WHERE id = ?', 
+                              (password_hash, s['id']))
+                count += 1
+            except Exception as e:
+                errors.append(f"Student ID {s['id']}: {e}")
+        
+        conn.commit()
+        conn.close()
+        
+        html = f"""
+        <html>
+        <head><title>Password Reset</title></head>
+        <body style="font-family:Segoe UI,sans-serif;padding:30px;">
+            <h2>✅ Password Reset Complete</h2>
+            <hr>
+            <p><strong>Success:</strong> Reset passwords for {count} students</p>
+            <p><strong>Students can now login with their Mother's Name (case insensitive).</strong></p>
+            """
+        
+        if errors:
+            html += f"<p><strong>Errors:</strong> {len(errors)}</p>"
+            for e in errors[:5]:
+                html += f"<p style='color:red;'>⚠️ {e}</p>"
+        
+        html += """
+            <hr>
+            <p><a href="/login">🔙 Go to Login</a></p>
+            <p><a href="/debug/list_students">📋 View Students</a></p>
+        </body>
+        </html>
+        """
+        return html
+    except Exception as e:
+        return f"❌ Error: {e}"
+
+# ====================================================================
+# TEACHER ROUTES
 # ====================================================================
 
 @app.route('/teacher/dashboard')
@@ -1199,6 +891,219 @@ def sync_data():
     except Exception as e:
         flash(f'⚠️ Error: {str(e)}', 'error')
     return redirect(url_for('teacher_dashboard'))
+
+# ====================================================================
+# STUDENT ROUTES
+# ====================================================================
+
+@app.route('/student/dashboard')
+@login_required
+def student_dashboard():
+    if session.get('is_teacher'):
+        return redirect(url_for('teacher_dashboard'))
+    
+    student_id = session['user_id']
+    progress = get_progress_for_student(student_id)
+    test_results = get_test_results(student_id)
+    stats = get_student_stats(student_id)
+    unread_count = get_unread_count(student_id)
+    
+    subjects = {}
+    for item in progress:
+        if item['subject'] not in subjects:
+            subjects[item['subject']] = []
+        subjects[item['subject']].append(item)
+    
+    total = len(progress)
+    done = sum(1 for p in progress if p['status'] == 'done')
+    
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head><title>Student Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box;}
+        body{font-family:Segoe UI,sans-serif;background:#f5f5f5;padding:20px;}
+        .container{max-width:1200px;margin:0 auto;}
+        .header{background:white;border-radius:15px;padding:20px 25px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,0.08);}
+        .header h1{font-size:22px;color:#333;}
+        .btn-group{display:flex;gap:10px;flex-wrap:wrap;}
+        .btn-message{background:#667eea;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;text-decoration:none;display:inline-block;}
+        .btn-logout{background:#dc3545;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;}
+        .badge{background:#e53e3e;color:white;padding:2px 8px;border-radius:10px;font-size:12px;margin-left:5px;}
+        .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:20px;margin-bottom:30px;}
+        .stat-card{background:white;border-radius:15px;padding:20px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,0.08);}
+        .stat-card .value{font-size:28px;font-weight:bold;color:#667eea;}
+        .stat-card .label{color:#666;font-size:13px;margin-top:5px;}
+        .section{background:white;border-radius:15px;padding:25px;margin-bottom:25px;box-shadow:0 2px 10px rgba(0,0,0,0.08);overflow-x:auto;}
+        .section-title{font-size:18px;color:#333;margin-bottom:20px;}
+        .subject-title{padding:12px 15px;font-weight:bold;color:white;border-radius:8px;margin-bottom:10px;}
+        .subject-physics{background:#4299e1;}
+        .subject-chemistry{background:#ed8936;}
+        .subject-mathematics{background:#9f7aea;}
+        table{width:100%;border-collapse:collapse;font-size:13px;}
+        th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #e0e0e0;}
+        th{background:#f8f9fa;font-weight:600;}
+        .status-done{background:#48bb78;color:white;padding:3px 8px;border-radius:4px;font-size:11px;}
+        .status-pending{background:#f56565;color:white;padding:3px 8px;border-radius:4px;font-size:11px;}
+        .btn-sm{padding:4px 8px;border:none;border-radius:4px;cursor:pointer;font-size:11px;margin:1px;}
+        .btn-done{background:#48bb78;color:white;}
+        .btn-pending{background:#f56565;color:white;}
+        .rank-badge{padding:2px 10px;border-radius:20px;font-weight:600;font-size:12px;}
+        .rank-good{background:#d4edda;color:#155724;}
+        .rank-avg{background:#fff3cd;color:#856404;}
+        .rank-low{background:#f8d7da;color:#721c24;}
+        .chart-container{height:280px;margin-top:10px;}
+        .progress-bar{background:#e0e0e0;border-radius:10px;overflow:hidden;height:6px;width:100px;}
+        .progress-fill{background:linear-gradient(90deg,#667eea,#764ba2);height:100%;border-radius:10px;}
+        @media (max-width:768px){.header{flex-direction:column;align-items:flex-start;gap:15px;}}
+    </style>
+    </head>
+    <body>
+    <div class="container">
+        <div class="header">
+            <div><h1>👋 Welcome, {{ session.user_name }}!</h1><p>Roll No: <strong>{{ session.roll_no }}</strong></p></div>
+            <div class="btn-group">
+                <a href="/student/messages" class="btn-message">💬 Messages <span class="badge">{{ unread_count }}</span></a>
+                <button class="btn-logout" onclick="location.href='/logout'">🚪 Logout</button>
+            </div>
+        </div>
+        
+        <div class="stats-grid">
+            <div class="stat-card"><div class="value">{{ done }}/{{ total }}</div><div class="label">Exercises Done</div></div>
+            <div class="stat-card"><div class="value">{{ "%.0f"|format((done/total*100) if total>0 else 0) }}%</div><div class="label">Completion</div></div>
+            <div class="stat-card"><div class="value">{{ stats.total_tests or 0 }}</div><div class="label">Tests Given</div></div>
+            <div class="stat-card"><div class="value">{{ "%.1f"|format(stats.avg_percentage or 0) }}%</div><div class="label">Avg Score</div></div>
+        </div>
+        
+        {% if test_results|length > 0 %}
+        <div class="section">
+            <div class="section-title">📊 Performance Trend</div>
+            <div class="chart-container"><canvas id="perfChart"></canvas></div>
+        </div>
+        {% endif %}
+        
+        <div class="section">
+            <div class="section-title">📝 Exercise Progress</div>
+            {% for subject, exercises in subjects.items() %}
+            <div class="subject-title subject-{{ subject.lower() }}">{{ subject }}</div>
+            <table>
+                <thead><tr><th>Chapter</th><th>Exercise</th><th>Status</th><th>Actions</th></tr></thead>
+                <tbody>
+                    {% for ex in exercises %}
+                    <tr>
+                        <td>{{ ex.chapter }}</td>
+                        <td>{{ ex.exercise_name }}</td>
+                        <td><span class="status-{{ ex.status }}">{{ ex.status.upper() }}</span></td>
+                        <td>
+                            <form method="POST" action="/student/update_progress" style="display:inline;">
+                                <input type="hidden" name="exercise_id" value="{{ ex.exercise_id }}">
+                                <button type="submit" name="status" value="done" class="btn-sm btn-done">✓ Done</button>
+                                <button type="submit" name="status" value="pending" class="btn-sm btn-pending">○ Pending</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endfor %}
+        </div>
+        
+        <div class="section">
+            <div class="section-title">📋 Test Results</div>
+            {% if test_results|length > 0 %}
+            <table>
+                <thead><tr><th>Test</th><th>Rank</th><th>Physics</th><th>Chemistry</th><th>Maths</th><th>Total</th><th>%</th></tr></thead>
+                <tbody>
+                    {% for r in test_results %}
+                    {% set rank_num = r.rank|int if r.rank != '-' and r.rank else 999 %}
+                    {% set rank_class = 'rank-good' if rank_num <= 50 else ('rank-avg' if rank_num <= 100 else 'rank-low') %}
+                    <tr>
+                        <td>{{ r.test_name }}</td>
+                        <td><span class="rank-badge {{ rank_class }}">#{{ r.rank if r.rank != '-' else '-' }}</span></td>
+                        <td>{{ "%.0f"|format(r.physics_marks) }}/{{ "%.0f"|format(r.physics_max) }}</td>
+                        <td>{{ "%.0f"|format(r.chemistry_marks) }}/{{ "%.0f"|format(r.chemistry_max) }}</td>
+                        <td>{{ "%.0f"|format(r.maths_marks) }}/{{ "%.0f"|format(r.maths_max) }}</td>
+                        <td><strong>{{ "%.0f"|format(r.total_marks) }}</strong>/{{ "%.0f"|format(r.total_max) }}</td>
+                        <td>{{ "%.1f"|format(r.percentage) }}%</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p style="padding:20px;color:#666;">No test results available yet.</p>
+            {% endif %}
+        </div>
+    </div>
+    
+    {% if test_results|length > 0 %}
+    <script>
+    const ctx = document.getElementById('perfChart').getContext('2d');
+    const tests = {{ test_results|map(attribute='test_name')|list|tojson }};
+    const percents = {{ test_results|map(attribute='percentage')|list|tojson }};
+    const totals = {{ test_results|map(attribute='total_marks')|list|tojson }};
+    const maxes = {{ test_results|map(attribute='total_max')|list|tojson }};
+
+    new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: tests.reverse(),
+            datasets: [{
+                label: 'Percentage (%)',
+                data: percents.reverse(),
+                backgroundColor: ['#667eea', '#764ba2', '#f093fb', '#4facfe', '#43e97b', '#fa709a'],
+                borderRadius: 6
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            const idx = context.dataIndex;
+                            return `Score: ${totals.reverse()[idx]}/${maxes.reverse()[idx]} (${percents.reverse()[idx].toFixed(1)}%)`;
+                        }
+                    }
+                }
+            },
+            scales: { y: { beginAtZero: true, max: 100 } }
+        }
+    });
+    </script>
+    {% endif %}
+    </body>
+    </html>
+    ''', subjects=subjects, total=total, done=done, test_results=test_results, stats=stats, unread_count=unread_count)
+
+@app.route('/student/update_progress', methods=['POST'])
+@login_required
+def student_update_progress():
+    if session.get('is_teacher'):
+        return redirect(url_for('teacher_dashboard'))
+    
+    student_id = session['user_id']
+    exercise_id = request.form['exercise_id']
+    status = request.form['status']
+    
+    try:
+        conn = get_db_connection()
+        if conn:
+            conn.execute('UPDATE progress SET status = ? WHERE student_id = ? AND exercise_id = ?',
+                        (status, student_id, exercise_id))
+            conn.commit()
+            conn.close()
+            flash('Status updated!', 'success')
+        else:
+            flash('Database error', 'error')
+    except Exception as e:
+        flash(f'Error: {e}', 'error')
+    
+    return redirect(url_for('student_dashboard'))
 
 # ====================================================================
 # MESSAGING ROUTES
@@ -1465,9 +1370,9 @@ def health_check():
 # ====================================================================
 
 if __name__ == '__main__':
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 60)
     print("🎓 Bakliwal Tutorials Portal Ready!")
     print("📱 Access at: http://localhost:5000")
-    print("=" * 70)
+    print("=" * 60)
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
