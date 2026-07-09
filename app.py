@@ -1,6 +1,6 @@
 # ====================================================================
 # BAKLIWAL TUTORIALS - COMPLETE STUDENT PORTAL
-# WITH DEBUG AND PASSWORD RESET ROUTES
+# FIXED: Database persistence and student loading
 # ====================================================================
 
 import os
@@ -14,8 +14,12 @@ from werkzeug.security import generate_password_hash, check_password_hash
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-this')
 
-# Database path
-DB_PATH = 'students.db'
+# Database path - use a persistent location
+DB_PATH = '/tmp/students.db'
+
+# Also try to use current directory as fallback
+if not os.path.exists('/tmp'):
+    DB_PATH = 'students.db'
 
 SHEET_NAME = os.environ.get('SHEET_NAME', 'Master Sheet')
 GOOGLE_CREDENTIALS_JSON = os.environ.get('GOOGLE_CREDENTIALS_JSON')
@@ -31,8 +35,10 @@ try:
     import gspread
     from oauth2client.service_account import ServiceAccountCredentials
     HAS_GSHEETS = True
+    print("✅ Google Sheets loaded")
 except ImportError:
     HAS_GSHEETS = False
+    print("❌ Google Sheets not available")
 
 # ====================================================================
 # DATABASE
@@ -130,15 +136,16 @@ def init_db():
             )
         ''')
 
-        # Add teachers
-        teachers = [
-            ('Physics Teacher', 'physics_teacher', 'physics@school.com', 'Physics'),
-            ('Chemistry Teacher', 'chemistry_teacher', 'chemistry@school.com', 'Chemistry'),
-            ('Mathematics Teacher', 'maths_teacher', 'maths@school.com', 'Mathematics')
-        ]
-        for name, username, email, subject in teachers:
-            cursor.execute('SELECT id FROM students WHERE email = ?', (email,))
-            if not cursor.fetchone():
+        # Check if teachers exist
+        cursor.execute('SELECT COUNT(*) as count FROM students WHERE is_teacher = 1')
+        if cursor.fetchone()[0] == 0:
+            print("📝 Adding teachers...")
+            teachers = [
+                ('Physics Teacher', 'physics_teacher', 'physics@school.com', 'Physics'),
+                ('Chemistry Teacher', 'chemistry_teacher', 'chemistry@school.com', 'Chemistry'),
+                ('Mathematics Teacher', 'maths_teacher', 'maths@school.com', 'Mathematics')
+            ]
+            for name, username, email, subject in teachers:
                 password_hash = generate_password_hash(username)
                 cursor.execute('''
                     INSERT INTO students (name, roll_no, mother_name, email, password_hash, is_teacher, subject)
@@ -148,6 +155,7 @@ def init_db():
         # Add exercises
         cursor.execute('SELECT COUNT(*) as count FROM exercises')
         if cursor.fetchone()[0] == 0:
+            print("📝 Adding exercises...")
             exercises = [
                 ('Physics', 'Chapter 1: Motion', 'Ex 1.1 - Speed'),
                 ('Physics', 'Chapter 1: Motion', 'Ex 1.2 - Acceleration'),
@@ -166,9 +174,20 @@ def init_db():
         conn.commit()
         conn.close()
         print("✅ Database initialized!")
+        
+        # Verify database has students
+        conn = get_db_connection()
+        if conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT COUNT(*) as count FROM students WHERE is_teacher = 0')
+            count = cursor.fetchone()[0]
+            conn.close()
+            print(f"📊 Database has {count} students")
         return True
     except Exception as e:
         print(f"❌ DB init error: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 # ====================================================================
@@ -188,6 +207,7 @@ def get_gs_client():
         return None
 
 def sync_all():
+    """Full sync from Google Sheets"""
     print("🔄 Starting sync...")
     client = get_gs_client()
     if not client:
@@ -209,8 +229,9 @@ def sync_all():
             for row in mother_data[1:]:
                 if len(row) >= 2 and row[0].strip():
                     mother_dict[row[0].strip().upper()] = row[1].strip()
-        except:
-            pass
+            print(f"📋 Loaded {len(mother_dict)} mother names")
+        except Exception as e:
+            print(f"⚠️ Mother Name error: {e}")
         
         headers = data[0]
         name_idx = headers.index('NAME') if 'NAME' in headers else -1
@@ -226,6 +247,7 @@ def sync_all():
             return 0, "DB connection failed"
         cursor = conn.cursor()
         
+        # Clear non-teacher students
         cursor.execute('DELETE FROM students WHERE is_teacher = 0')
         cursor.execute('DELETE FROM progress')
         
@@ -261,10 +283,13 @@ def sync_all():
         
         conn.commit()
         conn.close()
+        print(f"✅ Added {student_count} students")
         return student_count, None
         
     except Exception as e:
         print(f"❌ Sync error: {e}")
+        import traceback
+        traceback.print_exc()
         return 0, str(e)
 
 # ====================================================================
@@ -273,7 +298,29 @@ def sync_all():
 
 print("🔧 Initializing...")
 init_db()
-print("✅ Ready!")
+
+# Try to sync if credentials are available
+if GOOGLE_CREDENTIALS_JSON:
+    print("📡 Syncing from Google Sheets...")
+    count, error = sync_all()
+    if count > 0:
+        print(f"✅ Synced {count} students")
+    else:
+        print(f"⚠️ Sync failed: {error}")
+else:
+    print("⚠️ No Google Sheets credentials, using existing data")
+
+# Verify database
+conn = get_db_connection()
+if conn:
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) as count FROM students WHERE is_teacher = 0')
+    student_count = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) as count FROM test_results')
+    test_count = cursor.fetchone()[0]
+    conn.close()
+    print(f"📊 Database: {student_count} students, {test_count} test results")
+print("=" * 60)
 
 # ====================================================================
 # HELPERS
@@ -298,14 +345,22 @@ def teacher_required(f):
     return decorated
 
 def get_all_students():
+    """Get all student names for dropdown - WITH DEBUGGING"""
     try:
         conn = get_db_connection()
         if not conn:
+            print("❌ get_all_students: No DB connection")
             return []
+        
         students = conn.execute('SELECT id, name, roll_no FROM students WHERE is_teacher = 0 ORDER BY name').fetchall()
         conn.close()
+        
+        print(f"📋 get_all_students: Found {len(students)} students")
         return [dict(s) for s in students]
-    except:
+    except Exception as e:
+        print(f"❌ get_all_students error: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 def get_unread_count(user_id):
@@ -435,10 +490,6 @@ def get_student_stats(student_id):
 @app.route('/')
 def index():
     return redirect(url_for('login'))
-
-# ====================================================================
-# LOGIN ROUTE
-# ====================================================================
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -588,12 +639,11 @@ def logout():
     return redirect(url_for('login'))
 
 # ====================================================================
-# DEBUG ROUTES - TO FIX LOGIN ISSUES
+# DEBUG ROUTES
 # ====================================================================
 
 @app.route('/debug/check_student/<int:student_id>')
 def debug_check_student(student_id):
-    """Check what mother name is stored for a student"""
     try:
         conn = get_db_connection()
         student = conn.execute('SELECT id, name, roll_no, mother_name FROM students WHERE id = ?', (student_id,)).fetchone()
@@ -624,7 +674,6 @@ def debug_check_student(student_id):
 
 @app.route('/debug/list_students')
 def debug_list_students():
-    """List all students with their mother names"""
     try:
         conn = get_db_connection()
         students = conn.execute('SELECT id, name, roll_no, mother_name FROM students WHERE is_teacher = 0 ORDER BY name LIMIT 20').fetchall()
@@ -654,38 +703,62 @@ def debug_list_students():
     except Exception as e:
         return f"Error: {e}"
 
+@app.route('/debug/db_status')
+def debug_db_status():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) as count FROM students WHERE is_teacher = 0')
+        student_count = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) as count FROM students WHERE is_teacher = 1')
+        teacher_count = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) as count FROM test_results')
+        test_count = cursor.fetchone()[0]
+        conn.close()
+        return f"""
+        <html>
+        <head><title>Database Status</title></head>
+        <body style="font-family:Segoe UI,sans-serif;padding:30px;">
+            <h2>📊 Database Status</h2>
+            <hr>
+            <p><strong>Students:</strong> {student_count}</p>
+            <p><strong>Teachers:</strong> {teacher_count}</p>
+            <p><strong>Test Results:</strong> {test_count}</p>
+            <hr>
+            <p><a href="/login">🔙 Go back to Login</a></p>
+            <p><a href="/debug/list_students">📋 View Students</a></p>
+            <p><a href="/admin/reset_all_passwords">🔄 Reset Passwords</a></p>
+        </body>
+        </html>
+        """
+    except Exception as e:
+        return f"Error: {e}"
+
 # ====================================================================
-# RESET PASSWORDS ROUTE
+# RESET PASSWORDS
 # ====================================================================
 
 @app.route('/admin/reset_all_passwords')
 def reset_all_passwords():
-    """Reset ALL student passwords to their mother's name"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Get all students
         cursor.execute('SELECT id, mother_name FROM students WHERE is_teacher = 0')
         students = cursor.fetchall()
         
         count = 0
-        errors = []
         for s in students:
-            try:
-                # Clean mother name - remove extra spaces, convert to lowercase for hashing
-                clean_mother = s['mother_name'].strip().lower()
-                password_hash = generate_password_hash(clean_mother)
-                cursor.execute('UPDATE students SET password_hash = ? WHERE id = ?', 
-                              (password_hash, s['id']))
-                count += 1
-            except Exception as e:
-                errors.append(f"Student ID {s['id']}: {e}")
+            clean_mother = s['mother_name'].strip().lower()
+            password_hash = generate_password_hash(clean_mother)
+            cursor.execute('UPDATE students SET password_hash = ? WHERE id = ?', 
+                          (password_hash, s['id']))
+            count += 1
         
         conn.commit()
         conn.close()
         
-        html = f"""
+        return f"""
         <html>
         <head><title>Password Reset</title></head>
         <body style="font-family:Segoe UI,sans-serif;padding:30px;">
@@ -693,21 +766,12 @@ def reset_all_passwords():
             <hr>
             <p><strong>Success:</strong> Reset passwords for {count} students</p>
             <p><strong>Students can now login with their Mother's Name (case insensitive).</strong></p>
-            """
-        
-        if errors:
-            html += f"<p><strong>Errors:</strong> {len(errors)}</p>"
-            for e in errors[:5]:
-                html += f"<p style='color:red;'>⚠️ {e}</p>"
-        
-        html += """
             <hr>
             <p><a href="/login">🔙 Go to Login</a></p>
-            <p><a href="/debug/list_students">📋 View Students</a></p>
+            <p><a href="/debug/db_status">📊 Check Database</a></p>
         </body>
         </html>
         """
-        return html
     except Exception as e:
         return f"❌ Error: {e}"
 
@@ -917,168 +981,172 @@ def student_dashboard():
     total = len(progress)
     done = sum(1 for p in progress if p['status'] == 'done')
     
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html>
-    <head><title>Student Dashboard</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        *{margin:0;padding:0;box-sizing:border-box;}
-        body{font-family:Segoe UI,sans-serif;background:#f5f5f5;padding:20px;}
-        .container{max-width:1200px;margin:0 auto;}
-        .header{background:white;border-radius:15px;padding:20px 25px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,0.08);}
-        .header h1{font-size:22px;color:#333;}
-        .btn-group{display:flex;gap:10px;flex-wrap:wrap;}
-        .btn-message{background:#667eea;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;text-decoration:none;display:inline-block;}
-        .btn-logout{background:#dc3545;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;}
-        .badge{background:#e53e3e;color:white;padding:2px 8px;border-radius:10px;font-size:12px;margin-left:5px;}
-        .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:20px;margin-bottom:30px;}
-        .stat-card{background:white;border-radius:15px;padding:20px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,0.08);}
-        .stat-card .value{font-size:28px;font-weight:bold;color:#667eea;}
-        .stat-card .label{color:#666;font-size:13px;margin-top:5px;}
-        .section{background:white;border-radius:15px;padding:25px;margin-bottom:25px;box-shadow:0 2px 10px rgba(0,0,0,0.08);overflow-x:auto;}
-        .section-title{font-size:18px;color:#333;margin-bottom:20px;}
-        .subject-title{padding:12px 15px;font-weight:bold;color:white;border-radius:8px;margin-bottom:10px;}
-        .subject-physics{background:#4299e1;}
-        .subject-chemistry{background:#ed8936;}
-        .subject-mathematics{background:#9f7aea;}
-        table{width:100%;border-collapse:collapse;font-size:13px;}
-        th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #e0e0e0;}
-        th{background:#f8f9fa;font-weight:600;}
-        .status-done{background:#48bb78;color:white;padding:3px 8px;border-radius:4px;font-size:11px;}
-        .status-pending{background:#f56565;color:white;padding:3px 8px;border-radius:4px;font-size:11px;}
-        .btn-sm{padding:4px 8px;border:none;border-radius:4px;cursor:pointer;font-size:11px;margin:1px;}
-        .btn-done{background:#48bb78;color:white;}
-        .btn-pending{background:#f56565;color:white;}
-        .rank-badge{padding:2px 10px;border-radius:20px;font-weight:600;font-size:12px;}
-        .rank-good{background:#d4edda;color:#155724;}
-        .rank-avg{background:#fff3cd;color:#856404;}
-        .rank-low{background:#f8d7da;color:#721c24;}
-        .chart-container{height:280px;margin-top:10px;}
-        .progress-bar{background:#e0e0e0;border-radius:10px;overflow:hidden;height:6px;width:100px;}
-        .progress-fill{background:linear-gradient(90deg,#667eea,#764ba2);height:100%;border-radius:10px;}
-        @media (max-width:768px){.header{flex-direction:column;align-items:flex-start;gap:15px;}}
-    </style>
-    </head>
-    <body>
-    <div class="container">
-        <div class="header">
-            <div><h1>👋 Welcome, {{ session.user_name }}!</h1><p>Roll No: <strong>{{ session.roll_no }}</strong></p></div>
-            <div class="btn-group">
-                <a href="/student/messages" class="btn-message">💬 Messages <span class="badge">{{ unread_count }}</span></a>
-                <button class="btn-logout" onclick="location.href='/logout'">🚪 Logout</button>
-            </div>
-        </div>
-        
-        <div class="stats-grid">
-            <div class="stat-card"><div class="value">{{ done }}/{{ total }}</div><div class="label">Exercises Done</div></div>
-            <div class="stat-card"><div class="value">{{ "%.0f"|format((done/total*100) if total>0 else 0) }}%</div><div class="label">Completion</div></div>
-            <div class="stat-card"><div class="value">{{ stats.total_tests or 0 }}</div><div class="label">Tests Given</div></div>
-            <div class="stat-card"><div class="value">{{ "%.1f"|format(stats.avg_percentage or 0) }}%</div><div class="label">Avg Score</div></div>
-        </div>
-        
-        {% if test_results|length > 0 %}
-        <div class="section">
-            <div class="section-title">📊 Performance Trend</div>
-            <div class="chart-container"><canvas id="perfChart"></canvas></div>
-        </div>
-        {% endif %}
-        
-        <div class="section">
-            <div class="section-title">📝 Exercise Progress</div>
-            {% for subject, exercises in subjects.items() %}
-            <div class="subject-title subject-{{ subject.lower() }}">{{ subject }}</div>
-            <table>
-                <thead><tr><th>Chapter</th><th>Exercise</th><th>Status</th><th>Actions</th></tr></thead>
-                <tbody>
-                    {% for ex in exercises %}
-                    <tr>
-                        <td>{{ ex.chapter }}</td>
-                        <td>{{ ex.exercise_name }}</td>
-                        <td><span class="status-{{ ex.status }}">{{ ex.status.upper() }}</span></td>
-                        <td>
-                            <form method="POST" action="/student/update_progress" style="display:inline;">
-                                <input type="hidden" name="exercise_id" value="{{ ex.exercise_id }}">
-                                <button type="submit" name="status" value="done" class="btn-sm btn-done">✓ Done</button>
-                                <button type="submit" name="status" value="pending" class="btn-sm btn-pending">○ Pending</button>
-                            </form>
-                        </td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-            {% endfor %}
-        </div>
-        
-        <div class="section">
-            <div class="section-title">📋 Test Results</div>
-            {% if test_results|length > 0 %}
-            <table>
-                <thead><tr><th>Test</th><th>Rank</th><th>Physics</th><th>Chemistry</th><th>Maths</th><th>Total</th><th>%</th></tr></thead>
-                <tbody>
-                    {% for r in test_results %}
-                    {% set rank_num = r.rank|int if r.rank != '-' and r.rank else 999 %}
-                    {% set rank_class = 'rank-good' if rank_num <= 50 else ('rank-avg' if rank_num <= 100 else 'rank-low') %}
-                    <tr>
-                        <td>{{ r.test_name }}</td>
-                        <td><span class="rank-badge {{ rank_class }}">#{{ r.rank if r.rank != '-' else '-' }}</span></td>
-                        <td>{{ "%.0f"|format(r.physics_marks) }}/{{ "%.0f"|format(r.physics_max) }}</td>
-                        <td>{{ "%.0f"|format(r.chemistry_marks) }}/{{ "%.0f"|format(r.chemistry_max) }}</td>
-                        <td>{{ "%.0f"|format(r.maths_marks) }}/{{ "%.0f"|format(r.maths_max) }}</td>
-                        <td><strong>{{ "%.0f"|format(r.total_marks) }}</strong>/{{ "%.0f"|format(r.total_max) }}</td>
-                        <td>{{ "%.1f"|format(r.percentage) }}%</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-            {% else %}
-            <p style="padding:20px;color:#666;">No test results available yet.</p>
-            {% endif %}
+    return render_template_string(STUDENT_DASHBOARD_TEMPLATE, 
+        subjects=subjects, total=total, done=done, test_results=test_results, 
+        stats=stats, unread_count=unread_count)
+
+STUDENT_DASHBOARD_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head><title>Student Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+    *{margin:0;padding:0;box-sizing:border-box;}
+    body{font-family:Segoe UI,sans-serif;background:#f5f5f5;padding:20px;}
+    .container{max-width:1200px;margin:0 auto;}
+    .header{background:white;border-radius:15px;padding:20px 25px;margin-bottom:25px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;box-shadow:0 2px 10px rgba(0,0,0,0.08);}
+    .header h1{font-size:22px;color:#333;}
+    .btn-group{display:flex;gap:10px;flex-wrap:wrap;}
+    .btn-message{background:#667eea;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;text-decoration:none;display:inline-block;}
+    .btn-logout{background:#dc3545;color:white;padding:10px 20px;border:none;border-radius:8px;cursor:pointer;font-weight:600;}
+    .badge{background:#e53e3e;color:white;padding:2px 8px;border-radius:10px;font-size:12px;margin-left:5px;}
+    .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:20px;margin-bottom:30px;}
+    .stat-card{background:white;border-radius:15px;padding:20px;text-align:center;box-shadow:0 2px 10px rgba(0,0,0,0.08);}
+    .stat-card .value{font-size:28px;font-weight:bold;color:#667eea;}
+    .stat-card .label{color:#666;font-size:13px;margin-top:5px;}
+    .section{background:white;border-radius:15px;padding:25px;margin-bottom:25px;box-shadow:0 2px 10px rgba(0,0,0,0.08);overflow-x:auto;}
+    .section-title{font-size:18px;color:#333;margin-bottom:20px;}
+    .subject-title{padding:12px 15px;font-weight:bold;color:white;border-radius:8px;margin-bottom:10px;}
+    .subject-physics{background:#4299e1;}
+    .subject-chemistry{background:#ed8936;}
+    .subject-mathematics{background:#9f7aea;}
+    table{width:100%;border-collapse:collapse;font-size:13px;}
+    th,td{padding:10px 12px;text-align:left;border-bottom:1px solid #e0e0e0;}
+    th{background:#f8f9fa;font-weight:600;}
+    .status-done{background:#48bb78;color:white;padding:3px 8px;border-radius:4px;font-size:11px;}
+    .status-pending{background:#f56565;color:white;padding:3px 8px;border-radius:4px;font-size:11px;}
+    .btn-sm{padding:4px 8px;border:none;border-radius:4px;cursor:pointer;font-size:11px;margin:1px;}
+    .btn-done{background:#48bb78;color:white;}
+    .btn-pending{background:#f56565;color:white;}
+    .rank-badge{padding:2px 10px;border-radius:20px;font-weight:600;font-size:12px;}
+    .rank-good{background:#d4edda;color:#155724;}
+    .rank-avg{background:#fff3cd;color:#856404;}
+    .rank-low{background:#f8d7da;color:#721c24;}
+    .chart-container{height:280px;margin-top:10px;}
+    .progress-bar{background:#e0e0e0;border-radius:10px;overflow:hidden;height:6px;width:100px;}
+    .progress-fill{background:linear-gradient(90deg,#667eea,#764ba2);height:100%;border-radius:10px;}
+    @media (max-width:768px){.header{flex-direction:column;align-items:flex-start;gap:15px;}}
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <div><h1>👋 Welcome, {{ session.user_name }}!</h1><p>Roll No: <strong>{{ session.roll_no }}</strong></p></div>
+        <div class="btn-group">
+            <a href="/student/messages" class="btn-message">💬 Messages <span class="badge">{{ unread_count }}</span></a>
+            <button class="btn-logout" onclick="location.href='/logout'">🚪 Logout</button>
         </div>
     </div>
     
+    <div class="stats-grid">
+        <div class="stat-card"><div class="value">{{ done }}/{{ total }}</div><div class="label">Exercises Done</div></div>
+        <div class="stat-card"><div class="value">{{ "%.0f"|format((done/total*100) if total>0 else 0) }}%</div><div class="label">Completion</div></div>
+        <div class="stat-card"><div class="value">{{ stats.total_tests or 0 }}</div><div class="label">Tests Given</div></div>
+        <div class="stat-card"><div class="value">{{ "%.1f"|format(stats.avg_percentage or 0) }}%</div><div class="label">Avg Score</div></div>
+    </div>
+    
     {% if test_results|length > 0 %}
-    <script>
-    const ctx = document.getElementById('perfChart').getContext('2d');
-    const tests = {{ test_results|map(attribute='test_name')|list|tojson }};
-    const percents = {{ test_results|map(attribute='percentage')|list|tojson }};
-    const totals = {{ test_results|map(attribute='total_marks')|list|tojson }};
-    const maxes = {{ test_results|map(attribute='total_max')|list|tojson }};
+    <div class="section">
+        <div class="section-title">📊 Performance Trend</div>
+        <div class="chart-container"><canvas id="perfChart"></canvas></div>
+    </div>
+    {% endif %}
+    
+    <div class="section">
+        <div class="section-title">📝 Exercise Progress</div>
+        {% for subject, exercises in subjects.items() %}
+        <div class="subject-title subject-{{ subject.lower() }}">{{ subject }}</div>
+        <table>
+            <thead><tr><th>Chapter</th><th>Exercise</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody>
+                {% for ex in exercises %}
+                <tr>
+                    <td>{{ ex.chapter }}</td>
+                    <td>{{ ex.exercise_name }}</td>
+                    <td><span class="status-{{ ex.status }}">{{ ex.status.upper() }}</span></td>
+                    <td>
+                        <form method="POST" action="/student/update_progress" style="display:inline;">
+                            <input type="hidden" name="exercise_id" value="{{ ex.exercise_id }}">
+                            <button type="submit" name="status" value="done" class="btn-sm btn-done">✓ Done</button>
+                            <button type="submit" name="status" value="pending" class="btn-sm btn-pending">○ Pending</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endfor %}
+    </div>
+    
+    <div class="section">
+        <div class="section-title">📋 Test Results</div>
+        {% if test_results|length > 0 %}
+        <table>
+            <thead><tr><th>Test</th><th>Rank</th><th>Physics</th><th>Chemistry</th><th>Maths</th><th>Total</th><th>%</th></tr></thead>
+            <tbody>
+                {% for r in test_results %}
+                {% set rank_num = r.rank|int if r.rank != '-' and r.rank else 999 %}
+                {% set rank_class = 'rank-good' if rank_num <= 50 else ('rank-avg' if rank_num <= 100 else 'rank-low') %}
+                <tr>
+                    <td>{{ r.test_name }}</td>
+                    <td><span class="rank-badge {{ rank_class }}">#{{ r.rank if r.rank != '-' else '-' }}</span></td>
+                    <td>{{ "%.0f"|format(r.physics_marks) }}/{{ "%.0f"|format(r.physics_max) }}</td>
+                    <td>{{ "%.0f"|format(r.chemistry_marks) }}/{{ "%.0f"|format(r.chemistry_max) }}</td>
+                    <td>{{ "%.0f"|format(r.maths_marks) }}/{{ "%.0f"|format(r.maths_max) }}</td>
+                    <td><strong>{{ "%.0f"|format(r.total_marks) }}</strong>/{{ "%.0f"|format(r.total_max) }}</td>
+                    <td>{{ "%.1f"|format(r.percentage) }}%</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p style="padding:20px;color:#666;">No test results available yet.</p>
+        {% endif %}
+    </div>
+</div>
 
-    new Chart(ctx, {
-        type: 'bar',
-        data: {
-            labels: tests.reverse(),
-            datasets: [{
-                label: 'Percentage (%)',
-                data: percents.reverse(),
-                backgroundColor: ['#667eea', '#764ba2', '#f093fb', '#4facfe', '#43e97b', '#fa709a'],
-                borderRadius: 6
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: { display: false },
-                tooltip: {
-                    callbacks: {
-                        label: function(context) {
-                            const idx = context.dataIndex;
-                            return `Score: ${totals.reverse()[idx]}/${maxes.reverse()[idx]} (${percents.reverse()[idx].toFixed(1)}%)`;
-                        }
+{% if test_results|length > 0 %}
+<script>
+const ctx = document.getElementById('perfChart').getContext('2d');
+const tests = {{ test_results|map(attribute='test_name')|list|tojson }};
+const percents = {{ test_results|map(attribute='percentage')|list|tojson }};
+const totals = {{ test_results|map(attribute='total_marks')|list|tojson }};
+const maxes = {{ test_results|map(attribute='total_max')|list|tojson }};
+
+new Chart(ctx, {
+    type: 'bar',
+    data: {
+        labels: tests.reverse(),
+        datasets: [{
+            label: 'Percentage (%)',
+            data: percents.reverse(),
+            backgroundColor: ['#667eea', '#764ba2', '#f093fb', '#4facfe', '#43e97b', '#fa709a'],
+            borderRadius: 6
+        }]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+            legend: { display: false },
+            tooltip: {
+                callbacks: {
+                    label: function(context) {
+                        const idx = context.dataIndex;
+                        return `Score: ${totals.reverse()[idx]}/${maxes.reverse()[idx]} (${percents.reverse()[idx].toFixed(1)}%)`;
                     }
                 }
-            },
-            scales: { y: { beginAtZero: true, max: 100 } }
-        }
-    });
-    </script>
-    {% endif %}
-    </body>
-    </html>
-    ''', subjects=subjects, total=total, done=done, test_results=test_results, stats=stats, unread_count=unread_count)
+            }
+        },
+        scales: { y: { beginAtZero: true, max: 100 } }
+    }
+});
+</script>
+{% endif %}
+</body>
+</html>
+'''
 
 @app.route('/student/update_progress', methods=['POST'])
 @login_required
@@ -1124,84 +1192,7 @@ def teacher_messages():
         conversations[other_id]['messages'].append(msg)
         if msg['to_id'] == user_id and msg['is_read'] == 0:
             conversations[other_id]['unread_count'] += 1
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html>
-    <head><title>Messages</title>
-    <style>
-        *{margin:0;padding:0;box-sizing:border-box;}
-        body{font-family:Segoe UI,sans-serif;background:#f5f5f5;padding:20px;}
-        .container{max-width:1200px;margin:0 auto;background:white;border-radius:15px;padding:25px;}
-        .header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;margin-bottom:25px;padding-bottom:20px;border-bottom:2px solid #e0e0e0;}
-        .back-btn{background:#667eea;color:white;padding:10px 20px;text-decoration:none;border-radius:8px;}
-        .logout-btn{background:#dc3545;color:white;padding:10px 20px;text-decoration:none;border-radius:8px;}
-        .conversation{background:#f8f9fa;border-radius:10px;margin-bottom:15px;overflow:hidden;border:1px solid #e0e0e0;}
-        .conversation-header{background:#667eea;color:white;padding:12px 20px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;}
-        .conversation-header:hover{background:#5a67d8;}
-        .conversation-messages{padding:20px;max-height:400px;overflow-y:auto;display:none;}
-        .conversation-messages.active{display:block;}
-        .message{border-left:4px solid #667eea;padding:12px;margin-bottom:10px;background:white;border-radius:4px;}
-        .message.sent{border-left-color:#48bb78;}
-        .message.received{border-left-color:#667eea;}
-        .message-header{display:flex;justify-content:space-between;font-size:12px;color:#666;}
-        .message-body{font-size:14px;color:#333;}
-        .message-reply{background:#f8f9fa;padding:15px;border-radius:8px;margin-top:10px;}
-        .message-reply textarea{width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;height:60px;}
-        .message-reply .btn-reply{background:#48bb78;color:white;padding:8px 20px;border:none;border-radius:4px;cursor:pointer;margin-top:10px;}
-        .unread-badge{background:#e53e3e;color:white;padding:2px 8px;border-radius:10px;font-size:12px;}
-        .send-form{background:#f8f9fa;padding:20px;border-radius:10px;margin-bottom:30px;}
-        .form-group{margin-bottom:15px;}
-        label{display:block;margin-bottom:5px;font-weight:500;}
-        input[type=text],select,textarea{width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;}
-        textarea{height:80px;}
-        .btn-send{background:#48bb78;color:white;padding:10px 20px;border:none;border-radius:5px;cursor:pointer;}
-        .alert{padding:12px 15px;border-radius:10px;margin-bottom:20px;}
-        .alert-success{background:#d4edda;color:#155724;}
-        @media (max-width:768px){.header{flex-direction:column;align-items:flex-start;gap:15px;}}
-    </style>
-    </head>
-    <body>
-    <div class="container">
-        <div class="header"><div><h1>💬 Messages</h1></div><div><a href="/teacher/dashboard" class="back-btn">← Back</a><a href="/logout" class="logout-btn">Logout</a></div></div>
-        {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<div class="alert alert-success">{{ messages[0][1] }}</div>{% endif %}{% endwith %}
-        <div class="send-form"><h3>📤 New Message</h3>
-        <form method="POST" action="/teacher/send_message">
-            <div class="form-group"><label>Student</label><select name="to_id" required><option value="">Select Student</option>{% for s in students %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select></div>
-            <div class="form-group"><label>Subject</label><input type="text" name="subject" required></div>
-            <div class="form-group"><label>Message</label><textarea name="message" required></textarea></div>
-            <button type="submit" class="btn-send">📤 Send</button>
-        </form></div>
-        <h3>📥 Conversations</h3>
-        {% if conversations|length == 0 %}<p style="color:#666;margin-top:15px;">No conversations yet.</p>{% else %}
-            {% for other_id, conv in conversations.items() %}
-            <div class="conversation">
-                <div class="conversation-header" onclick="toggleConversation(this)"><span><strong>{{ conv.name }}</strong>{% if conv.unread_count > 0 %}<span class="unread-badge">{{ conv.unread_count }} new</span>{% endif %}</span><span>{{ conv.messages|length }} messages</span></div>
-                <div class="conversation-messages">
-                    {% for msg in conv.messages|reverse %}
-                    <div class="message {% if msg.from_id == session.user_id %}sent{% else %}received{% endif %}">
-                        <div class="message-header"><span><strong>{{ msg.from_name }}</strong> → {{ msg.to_name }}</span><span>{{ msg.created_at[:16] }}</span></div>
-                        <div class="message-body"><strong>{{ msg.subject }}</strong><br>{{ msg.message }}</div>
-                        {% if msg.to_id == session.user_id and msg.is_read == 0 %}
-                        <form method="POST" action="/teacher/mark_read" style="margin-top:5px;"><input type="hidden" name="message_id" value="{{ msg.id }}"><button type="submit" style="padding:3px 10px;background:#667eea;color:white;border:none;border-radius:4px;cursor:pointer;font-size:11px;">✓ Mark Read</button></form>{% endif %}
-                    </div>
-                    {% endfor %}
-                    <div class="message-reply">
-                        <form method="POST" action="/teacher/send_reply">
-                            <input type="hidden" name="to_id" value="{{ other_id }}">
-                            <input type="hidden" name="subject" value="Re: {{ conv.messages[0].subject if conv.messages else 'Reply' }}">
-                            <textarea name="message" placeholder="Type your reply..." required></textarea>
-                            <button type="submit" class="btn-reply">💬 Reply</button>
-                        </form>
-                    </div>
-                </div>
-            </div>
-            {% endfor %}
-        {% endif %}
-    </div>
-    <script>function toggleConversation(header){const messages=header.nextElementSibling;messages.classList.toggle('active');}</script>
-    </body>
-    </html>
-    ''', conversations=conversations, students=students)
+    return render_template_string(MESSAGES_TEMPLATE, conversations=conversations, students=students)
 
 @app.route('/teacher/send_message', methods=['POST'])
 @teacher_required
@@ -1247,84 +1238,117 @@ def student_messages():
         if msg['to_id'] == user_id and msg['is_read'] == 0:
             conversations[other_id]['unread_count'] += 1
     
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html>
-    <head><title>Messages</title>
-    <style>
-        *{margin:0;padding:0;box-sizing:border-box;}
-        body{font-family:Segoe UI,sans-serif;background:#f5f5f5;padding:20px;}
-        .container{max-width:1200px;margin:0 auto;background:white;border-radius:15px;padding:25px;}
-        .header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;margin-bottom:25px;padding-bottom:20px;border-bottom:2px solid #e0e0e0;}
-        .back-btn{background:#667eea;color:white;padding:10px 20px;text-decoration:none;border-radius:8px;}
-        .logout-btn{background:#dc3545;color:white;padding:10px 20px;text-decoration:none;border-radius:8px;}
-        .conversation{background:#f8f9fa;border-radius:10px;margin-bottom:15px;overflow:hidden;border:1px solid #e0e0e0;}
-        .conversation-header{background:#667eea;color:white;padding:12px 20px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;}
-        .conversation-header:hover{background:#5a67d8;}
-        .conversation-messages{padding:20px;max-height:400px;overflow-y:auto;display:none;}
-        .conversation-messages.active{display:block;}
-        .message{border-left:4px solid #667eea;padding:12px;margin-bottom:10px;background:white;border-radius:4px;}
-        .message.sent{border-left-color:#48bb78;}
-        .message.received{border-left-color:#667eea;}
-        .message-header{display:flex;justify-content:space-between;font-size:12px;color:#666;}
-        .message-body{font-size:14px;color:#333;}
-        .message-reply{background:#f8f9fa;padding:15px;border-radius:8px;margin-top:10px;}
-        .message-reply textarea{width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;height:60px;}
-        .message-reply .btn-reply{background:#48bb78;color:white;padding:8px 20px;border:none;border-radius:4px;cursor:pointer;margin-top:10px;}
-        .unread-badge{background:#e53e3e;color:white;padding:2px 8px;border-radius:10px;font-size:12px;}
-        .send-form{background:#f8f9fa;padding:20px;border-radius:10px;margin-bottom:30px;}
-        .form-group{margin-bottom:15px;}
-        label{display:block;margin-bottom:5px;font-weight:500;}
-        input[type=text],select,textarea{width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;}
-        textarea{height:80px;}
-        .btn-send{background:#48bb78;color:white;padding:10px 20px;border:none;border-radius:5px;cursor:pointer;}
-        .alert{padding:12px 15px;border-radius:10px;margin-bottom:20px;}
-        .alert-success{background:#d4edda;color:#155724;}
-        @media (max-width:768px){.header{flex-direction:column;align-items:flex-start;gap:15px;}}
-    </style>
-    </head>
-    <body>
-    <div class="container">
-        <div class="header"><div><h1>💬 Messages</h1></div><div><a href="/student/dashboard" class="back-btn">← Back</a><a href="/logout" class="logout-btn">Logout</a></div></div>
-        {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<div class="alert alert-success">{{ messages[0][1] }}</div>{% endif %}{% endwith %}
-        <div class="send-form"><h3>📤 New Message</h3>
-        <form method="POST" action="/student/send_message">
-            <div class="form-group"><label>Teacher</label><select name="to_id" required><option value="">Select Teacher</option>{% for t in teachers %}<option value="{{ t.id }}">{{ t.name }} ({{ t.subject }})</option>{% endfor %}</select></div>
+    return render_template_string(MESSAGES_TEMPLATE, conversations=conversations, teachers=teachers, is_student=True)
+
+MESSAGES_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head><title>Messages</title>
+<style>
+    *{margin:0;padding:0;box-sizing:border-box;}
+    body{font-family:Segoe UI,sans-serif;background:#f5f5f5;padding:20px;}
+    .container{max-width:1200px;margin:0 auto;background:white;border-radius:15px;padding:25px;}
+    .header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;margin-bottom:25px;padding-bottom:20px;border-bottom:2px solid #e0e0e0;}
+    .back-btn{background:#667eea;color:white;padding:10px 20px;text-decoration:none;border-radius:8px;}
+    .logout-btn{background:#dc3545;color:white;padding:10px 20px;text-decoration:none;border-radius:8px;}
+    .conversation{background:#f8f9fa;border-radius:10px;margin-bottom:15px;overflow:hidden;border:1px solid #e0e0e0;}
+    .conversation-header{background:#667eea;color:white;padding:12px 20px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;}
+    .conversation-header:hover{background:#5a67d8;}
+    .conversation-messages{padding:20px;max-height:400px;overflow-y:auto;display:none;}
+    .conversation-messages.active{display:block;}
+    .message{border-left:4px solid #667eea;padding:12px;margin-bottom:10px;background:white;border-radius:4px;}
+    .message.sent{border-left-color:#48bb78;}
+    .message.received{border-left-color:#667eea;}
+    .message-header{display:flex;justify-content:space-between;font-size:12px;color:#666;}
+    .message-body{font-size:14px;color:#333;}
+    .message-reply{background:#f8f9fa;padding:15px;border-radius:8px;margin-top:10px;}
+    .message-reply textarea{width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;height:60px;}
+    .message-reply .btn-reply{background:#48bb78;color:white;padding:8px 20px;border:none;border-radius:4px;cursor:pointer;margin-top:10px;}
+    .unread-badge{background:#e53e3e;color:white;padding:2px 8px;border-radius:10px;font-size:12px;}
+    .send-form{background:#f8f9fa;padding:20px;border-radius:10px;margin-bottom:30px;}
+    .form-group{margin-bottom:15px;}
+    label{display:block;margin-bottom:5px;font-weight:500;}
+    input[type=text],select,textarea{width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;}
+    textarea{height:80px;}
+    .btn-send{background:#48bb78;color:white;padding:10px 20px;border:none;border-radius:5px;cursor:pointer;}
+    .alert{padding:12px 15px;border-radius:10px;margin-bottom:20px;}
+    .alert-success{background:#d4edda;color:#155724;}
+    @media (max-width:768px){.header{flex-direction:column;align-items:flex-start;gap:15px;}}
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <div><h1>💬 Messages</h1></div>
+        <div>
+            <a href="{% if is_student %}/student/dashboard{% else %}/teacher/dashboard{% endif %}" class="back-btn">← Back</a>
+            <a href="/logout" class="logout-btn">Logout</a>
+        </div>
+    </div>
+    {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}<div class="alert alert-success">{{ messages[0][1] }}</div>{% endif %}{% endwith %}
+    
+    <div class="send-form">
+        <h3>📤 New Message</h3>
+        <form method="POST" action="{% if is_student %}/student/send_message{% else %}/teacher/send_message{% endif %}">
+            <div class="form-group">
+                <label>Recipient</label>
+                <select name="to_id" required>
+                    <option value="">Select Recipient</option>
+                    {% if is_student %}
+                        {% for t in teachers %}
+                        <option value="{{ t.id }}">{{ t.name }} ({{ t.subject }})</option>
+                        {% endfor %}
+                    {% else %}
+                        {% for s in students %}
+                        <option value="{{ s.id }}">{{ s.name }}</option>
+                        {% endfor %}
+                    {% endif %}
+                </select>
+            </div>
             <div class="form-group"><label>Subject</label><input type="text" name="subject" required></div>
             <div class="form-group"><label>Message</label><textarea name="message" required></textarea></div>
             <button type="submit" class="btn-send">📤 Send</button>
-        </form></div>
-        <h3>📥 Conversations</h3>
-        {% if conversations|length == 0 %}<p style="color:#666;margin-top:15px;">No conversations yet.</p>{% else %}
-            {% for other_id, conv in conversations.items() %}
-            <div class="conversation">
-                <div class="conversation-header" onclick="toggleConversation(this)"><span><strong>{{ conv.name }}</strong>{% if conv.unread_count > 0 %}<span class="unread-badge">{{ conv.unread_count }} new</span>{% endif %}</span><span>{{ conv.messages|length }} messages</span></div>
-                <div class="conversation-messages">
-                    {% for msg in conv.messages|reverse %}
-                    <div class="message {% if msg.from_id == session.user_id %}sent{% else %}received{% endif %}">
-                        <div class="message-header"><span><strong>{{ msg.from_name }}</strong> → {{ msg.to_name }}</span><span>{{ msg.created_at[:16] }}</span></div>
-                        <div class="message-body"><strong>{{ msg.subject }}</strong><br>{{ msg.message }}</div>
-                        {% if msg.to_id == session.user_id and msg.is_read == 0 %}
-                        <form method="POST" action="/student/mark_read" style="margin-top:5px;"><input type="hidden" name="message_id" value="{{ msg.id }}"><button type="submit" style="padding:3px 10px;background:#667eea;color:white;border:none;border-radius:4px;cursor:pointer;font-size:11px;">✓ Mark Read</button></form>{% endif %}
-                    </div>
-                    {% endfor %}
-                    <div class="message-reply">
-                        <form method="POST" action="/student/send_reply">
-                            <input type="hidden" name="to_id" value="{{ other_id }}">
-                            <input type="hidden" name="subject" value="Re: {{ conv.messages[0].subject if conv.messages else 'Reply' }}">
-                            <textarea name="message" placeholder="Type your reply..." required></textarea>
-                            <button type="submit" class="btn-reply">💬 Reply</button>
-                        </form>
-                    </div>
+        </form>
+    </div>
+    
+    <h3>📥 Conversations</h3>
+    {% if conversations|length == 0 %}<p style="color:#666;margin-top:15px;">No conversations yet.</p>
+    {% else %}
+        {% for other_id, conv in conversations.items() %}
+        <div class="conversation">
+            <div class="conversation-header" onclick="toggleConversation(this)">
+                <span><strong>{{ conv.name }}</strong>{% if conv.unread_count > 0 %}<span class="unread-badge">{{ conv.unread_count }} new</span>{% endif %}</span>
+                <span>{{ conv.messages|length }} messages</span>
+            </div>
+            <div class="conversation-messages">
+                {% for msg in conv.messages|reverse %}
+                <div class="message {% if msg.from_id == session.user_id %}sent{% else %}received{% endif %}">
+                    <div class="message-header"><span><strong>{{ msg.from_name }}</strong> → {{ msg.to_name }}</span><span>{{ msg.created_at[:16] }}</span></div>
+                    <div class="message-body"><strong>{{ msg.subject }}</strong><br>{{ msg.message }}</div>
+                    {% if msg.to_id == session.user_id and msg.is_read == 0 %}
+                    <form method="POST" action="{% if is_student %}/student/mark_read{% else %}/teacher/mark_read{% endif %}" style="margin-top:5px;">
+                        <input type="hidden" name="message_id" value="{{ msg.id }}">
+                        <button type="submit" style="padding:3px 10px;background:#667eea;color:white;border:none;border-radius:4px;cursor:pointer;font-size:11px;">✓ Mark Read</button>
+                    </form>{% endif %}
+                </div>
+                {% endfor %}
+                <div class="message-reply">
+                    <form method="POST" action="{% if is_student %}/student/send_reply{% else %}/teacher/send_reply{% endif %}">
+                        <input type="hidden" name="to_id" value="{{ other_id }}">
+                        <input type="hidden" name="subject" value="Re: {{ conv.messages[0].subject if conv.messages else 'Reply' }}">
+                        <textarea name="message" placeholder="Type your reply..." required></textarea>
+                        <button type="submit" class="btn-reply">💬 Reply</button>
+                    </form>
                 </div>
             </div>
-            {% endfor %}
-        {% endif %}
-    </div>
-    <script>function toggleConversation(header){const messages=header.nextElementSibling;messages.classList.toggle('active');}</script>
-    </body>
-    </html>
-    ''', conversations=conversations, teachers=teachers)
+        </div>
+        {% endfor %}
+    {% endif %}
+</div>
+<script>function toggleConversation(header){const messages=header.nextElementSibling;messages.classList.toggle('active');}</script>
+</body>
+</html>
+'''
 
 @app.route('/student/send_message', methods=['POST'])
 @login_required
